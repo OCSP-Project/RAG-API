@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: rag-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: rag_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    
+  api:
+    build: .
+    container_name: rag-api
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://postgres:root@postgres:5432/rag_db
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - COLAB_EMBEDDING_URL=${COLAB_EMBEDDING_URL}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

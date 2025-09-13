@@ -1,0 +1,359 @@
+# app/main.py
+import os
+import json
+from typing import List, Dict, Optional, Any, Tuple
+
+import asyncio
+import httpx
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+# ===== Gemini =====
+import google.generativeai as genai
+
+# =========================
+# Config & Globals
+# =========================
+APP_TITLE = "OCSP RAG API"
+APP_VERSION = "1.0.0"
+
+DB_URL = os.getenv("URL") or os.getenv("DATABASE_URL") or ""
+COLAB_EMBEDDING_URL = (os.getenv("COLAB_EMBEDDING_URL") or "").rstrip("/")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+EMBED_DIM = 768  # dangvantuan/vietnamese-document-embedding
+
+# Gemini model (optional)
+if GEMINI_API_KEY and GEMINI_API_KEY != "your-gemini-key-here":
+    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        GEMINI_MODEL = genai.GenerativeModel("gemini-1.5-flash")
+    except Exception:
+        GEMINI_MODEL = None
+else:
+    GEMINI_MODEL = None
+
+app = FastAPI(title=APP_TITLE, version=APP_VERSION)
+
+# CORS (prod nên giới hạn origin cụ thể)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =========================
+# Pydantic Schemas
+# =========================
+class DocItem(BaseModel):
+    content: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class AddDocsRequest(BaseModel):
+    docs: List[DocItem]
+
+class QueryRequest(BaseModel):
+    query: str
+    k: int = 5
+
+class ChatRequest(BaseModel):
+    message: str
+    user_id: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    response: str
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+
+class StoreChunkRequest(BaseModel):
+    content: str
+    embedding: List[float]   # 768-d
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+# =========================
+# DB Helpers
+# =========================
+def get_db_connection():
+    if not DB_URL:
+        raise HTTPException(status_code=500, detail="DB URL chưa cấu hình (env URL hoặc DATABASE_URL).")
+    try:
+        conn = psycopg2.connect(DB_URL)
+        return conn
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Không kết nối được DB: {e}")
+
+def run_sql(conn, sql: str, params: Tuple = None):
+    cur = conn.cursor()
+    cur.execute(sql, params or ())
+    return cur
+
+def init_db():
+    """
+    Tạo extension, bảng và index nếu chưa có.
+    - vector_cosine_ops: phù hợp với cách tính score = 1 - (embedding <=> q)
+    """
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS document_chunks (
+            id BIGSERIAL PRIMARY KEY,
+            content TEXT NOT NULL,
+            embedding VECTOR(%s) NOT NULL,
+            metadata JSONB DEFAULT '{}'::jsonb
+        );
+        """, (EMBED_DIM,))
+
+        # IVF Flat index cho cosine
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_embedding_ivfflat
+        ON document_chunks
+        USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100);
+        """)
+
+        # GIN index cho metadata nếu sau này cần filter
+        cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chunks_metadata
+        ON document_chunks USING GIN (metadata);
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+# =========================
+# Utilities
+# =========================
+def _vec_to_pg(v: List[float]) -> str:
+    """Convert Python list -> pgvector literal string like: [0.1,0.2,...]"""
+    return "[" + ",".join(f"{float(x):.6f}" for x in v) + "]"
+
+async def embed_via_colab(texts: List[str]) -> List[List[float]]:
+    if not COLAB_EMBEDDING_URL:
+        raise HTTPException(500, "COLAB_EMBEDDING_URL chưa cấu hình")
+    payload = {"texts": texts}
+    timeout = httpx.Timeout(60.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            r = await client.post(f"{COLAB_EMBEDDING_URL}/embed", json=payload)
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(500, f"Embedding service lỗi: {e}")
+
+    data = r.json()
+    vecs = data.get("vectors") or data.get("embeddings")
+    if not isinstance(vecs, list) or len(vecs) != len(texts):
+        raise HTTPException(500, "Embedding service trả về sai format/độ dài")
+    # Optional: validate dimension
+    for i, v in enumerate(vecs):
+        if not isinstance(v, list) or len(v) != EMBED_DIM:
+            raise HTTPException(500, f"Embedding chiều sai tại index {i}: expected {EMBED_DIM}, got {len(v) if isinstance(v, list) else 'N/A'}")
+    return vecs
+
+async def check_colab_health() -> str:
+    if not COLAB_EMBEDDING_URL:
+        return "not_configured"
+    timeout = httpx.Timeout(10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            r = await client.get(f"{COLAB_EMBEDDING_URL}/health")
+            return "connected" if r.status_code == 200 else "error"
+        except Exception:
+            return "disconnected"
+
+# =========================
+# Startup
+# =========================
+@app.on_event("startup")
+async def on_startup():
+    # Init DB schema/index
+    init_db()
+
+# =========================
+# Routes
+# =========================
+@app.get("/")
+async def root():
+    return {"message": f"{APP_TITLE} is running!", "version": APP_VERSION, "docs": "/docs"}
+
+@app.get("/health")
+async def health_check():
+    # DB status
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM document_chunks;")
+        doc_count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        db_status = "connected"
+    except Exception as e:
+        doc_count = None
+        db_status = f"error: {e}"
+
+    # Colab status
+    colab_status = await check_colab_health()
+
+    return {
+        "status": "healthy" if db_status == "connected" else "degraded",
+        "database": db_status,
+        "document_count": doc_count if doc_count is not None else 0,
+        "colab_embedding_service": colab_status,
+        "gemini_configured": GEMINI_MODEL is not None,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# Add docs (embed via Colab)
+@app.post("/add_docs")
+async def add_docs(req: AddDocsRequest):
+    if not req.docs:
+        raise HTTPException(400, "docs rỗng")
+    texts = [d.content for d in req.docs]
+    vecs = await embed_via_colab(texts)  # 768-d
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        ids: List[int] = []
+        for d, v in zip(req.docs, vecs):
+            v_str = _vec_to_pg(v)
+            cur.execute(
+                """
+                INSERT INTO document_chunks (content, embedding, metadata)
+                VALUES (%s, %s::vector, %s)
+                RETURNING id
+                """,
+                (d.content, v_str, json.dumps(d.metadata))
+            )
+            ids.append(cur.fetchone()[0])
+        conn.commit()
+        return {"added": len(ids), "ids": ids}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, str(e))
+    finally:
+        cur.close(); conn.close()
+
+# Store chunk (embedding đã tính sẵn)
+@app.post("/store-chunk")
+async def store_chunk(request: StoreChunkRequest):
+    if len(request.embedding) != EMBED_DIM:
+        raise HTTPException(400, f"Embedding phải có {EMBED_DIM} chiều.")
+    try:
+        v_str = _vec_to_pg(request.embedding)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO document_chunks (content, embedding, metadata)
+            VALUES (%s, %s::vector, %s)
+            RETURNING id
+            """,
+            (request.content, v_str, json.dumps(request.metadata))
+        )
+        chunk_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close(); conn.close()
+        return {"message": "Chunk stored successfully", "id": chunk_id}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# Search similar
+@app.post("/search-similar")
+async def search_similar(req: QueryRequest):
+    # Embed query
+    q_vec = (await embed_via_colab([req.query]))[0]
+    v_str = _vec_to_pg(q_vec)
+
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute(
+            """
+            SELECT id, content, metadata,
+                   1 - (embedding <=> %s::vector) AS score
+            FROM document_chunks
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (v_str, v_str, req.k)
+        )
+        rows = cur.fetchall()
+        return {
+            "query": req.query,
+            "results": [
+                {
+                    "id": r["id"],
+                    "content": r["content"],
+                    "metadata": r["metadata"],
+                    "score": float(r["score"])
+                } for r in rows
+            ]
+        }
+    finally:
+        cur.close(); conn.close()
+
+# RAG endpoint
+@app.post("/rag")
+async def rag(req: QueryRequest):
+    # Retrieve
+    res = await search_similar(req)
+    hits = res["results"]
+    ctx = "\n\n---\n\n".join(f"[{i+1}] {h['content']}" for i, h in enumerate(hits)) or "N/A"
+
+    if not GEMINI_MODEL:
+        raise HTTPException(500, "Gemini API chưa cấu hình")
+
+    prompt = f"""
+Bạn là trợ lý AI chuyên về xây dựng tại Việt Nam.
+
+Câu hỏi: {req.query}
+
+Ngữ cảnh:
+{ctx}
+
+Yêu cầu:
+- Trả lời dựa trên ngữ cảnh. Nếu thiếu, nói rõ là chưa đủ dữ liệu.
+- Dùng tiếng Việt, ngắn gọn.
+- Trích dẫn [1], [2]... ứng với thứ tự ngữ cảnh khi có thể.
+""".strip()
+
+    try:
+        resp = GEMINI_MODEL.generate_content(prompt)
+        answer = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+        if not answer:
+            answer = "Xin lỗi, tôi chưa thể tạo câu trả lời từ ngữ cảnh hiện có."
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi model: {e}")
+
+    return {"answer": answer, "retrieved": hits}
+
+# Chat endpoint (ví dụ dùng cho .NET)
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    try:
+        rag_response = await rag(QueryRequest(query=request.message, k=3))
+        return ChatResponse(
+            response=rag_response["answer"],
+            sources=[
+                {
+                    "type": hit.get("metadata", {}).get("type", "unknown"),
+                    "content": (hit["content"][:200] + "...") if hit.get("content") else "",
+                    "score": hit.get("score")
+                }
+                for hit in rag_response.get("retrieved", [])
+            ]
+        )
+    except Exception as e:
+        return ChatResponse(
+            response=f"Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi: {str(e)}",
+            sources=[]
+        )
+
