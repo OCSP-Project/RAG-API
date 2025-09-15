@@ -18,7 +18,7 @@ except ImportError:
     print("WARNING: sentence-transformers not installed")
     print("Run: pip install sentence-transformers torch transformers")
 
-MODEL_ID = os.environ.get("MODEL_ID", "dangvantuan/vietnamese-document-embedding")
+MODEL_ID = os.getenv("MODEL_ID", "dangvantuan/vietnamese-document-embedding")
 
 app = FastAPI(title="Vietnamese Embedding Service", version="1.0.0")
 

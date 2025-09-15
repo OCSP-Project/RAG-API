@@ -19,7 +19,7 @@ APP_VERSION = "1.0.0"
 DB_URL = os.getenv("URL") or os.getenv("DATABASE_URL") or ""
 COLAB_EMBEDDING_URL = (os.getenv("COLAB_EMBEDDING_URL") or "").rstrip("/")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))  # ✅ Fixed: 384 cho model tiếng Việt
+EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))  # ✅ Fixed: 768 cho model tiếng Việt
 
 # Cấu hình Gemini
 if GEMINI_API_KEY and GEMINI_API_KEY != "your-gemini-key-here":
