@@ -400,22 +400,21 @@ async def upload_document(req: DocumentUploadRequest):
 
 @app.post("/ingest/url")
 def ingest_url(req: IngestURLReq):
-    # 1) Tải file
-    resp = _rq.get(req.url, timeout=60)
-    resp.raise_for_status()
-    # 2) Docling convert
+    # Fix: Pass URL directly to Docling, don't download first
     conv = DocumentConverter()
-    result = conv.convert(io.BytesIO(resp.content))
-    md = result.document.export_to_markdown()
+    try:
+        result = conv.convert(req.url)  # Pass URL directly
+        md = result.document.export_to_markdown()
+    except Exception as e:
+        raise HTTPException(500, f"Document conversion failed: {e}")
 
-    # 3) Chunk
+    # Rest of code stays same
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap,
         separators=["\n\n","\n"," ",""]
     )
     chunks = splitter.split_text(md)
 
-    # 4) Embed + lưu
     vecs = embed_via_colab(chunks)
     conn = get_db_connection(); cur = conn.cursor()
     try:
