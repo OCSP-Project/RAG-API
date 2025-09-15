@@ -1,0 +1,7 @@
+# requirements_embedding.txt - Cho embedding service riêng
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<0.31
+sentence-transformers>=2.2.0
+torch>=2.0.0
+transformers>=4.30.0
+numpy>=1.24.0

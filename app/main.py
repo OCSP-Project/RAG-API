@@ -19,7 +19,7 @@ APP_VERSION = "1.0.0"
 DB_URL = os.getenv("URL") or os.getenv("DATABASE_URL") or ""
 COLAB_EMBEDDING_URL = (os.getenv("COLAB_EMBEDDING_URL") or "").rstrip("/")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
+EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))  # ✅ Fixed: 384 cho model tiếng Việt
 
 # Cấu hình Gemini
 if GEMINI_API_KEY and GEMINI_API_KEY != "your-gemini-key-here":
@@ -64,6 +64,7 @@ class QueryRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
+    top_k: int = 5  # ✅ Fixed: Added missing field
 
 class ChatResponse(BaseModel):
     response: str
@@ -73,6 +74,11 @@ class StoreChunkRequest(BaseModel):
     content: str
     embedding: List[float]
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class IngestURLReq(BaseModel):
+    url: str
+    chunk_size: int = 1200
+    chunk_overlap: int = 150
 
 # ===================== DB Helpers =====================
 def get_db_connection():
@@ -86,48 +92,48 @@ def get_db_connection():
 def _vec_to_pg(v: List[float]) -> str:
     return "[" + ",".join(f"{float(x):.6f}" for x in v) + "]"
 
-
-class IngestURLReq(BaseModel):
-    url: str
-    chunk_size: int = 1200
-    chunk_overlap: int = 150
 # ===================== Embedding Service =====================
 def embed_via_colab(texts: List[str]) -> List[List[float]]:
     if not COLAB_EMBEDDING_URL:
         raise HTTPException(500, "COLAB_EMBEDDING_URL chưa cấu hình")
+    
     url = f"{COLAB_EMBEDDING_URL}/embed"
     headers = {"Content-Type": "application/json"}
-    tries = [
-        {"json": {"texts": texts}},
-        {"json": {"text": texts[0] if len(texts) == 1 else "\n".join(texts)}},
-        {"json": {"inputs": texts}},
-    ]
-    last_err = None
-    for payload in tries:
-        try:
-            r = requests.post(url, headers=headers, timeout=60, **payload)
-            if r.status_code == 200:
-                data = r.json()
-                vecs = data.get("vectors") or data.get("embeddings") or data.get("data")
-                # Một số service trả [{"embedding": [...]}]
-                if isinstance(vecs, list) and vecs and isinstance(vecs[0], dict) and "embedding" in vecs[0]:
-                    vecs = [item["embedding"] for item in vecs]
-                if not isinstance(vecs, list):
-                    raise ValueError(f"Phản hồi không hợp lệ: {data}")
-                if len(vecs) != len(texts):
-                    if len(texts) > 1 and len(vecs) == 1:
-                        vecs = vecs * len(texts)
-                    else:
-                        raise ValueError(f"Độ dài vectors ({len(vecs)}) != texts ({len(texts)})")
-                for i, v in enumerate(vecs):
-                    if not isinstance(v, list) or len(v) != EMBED_DIM:
-                        raise ValueError(f"Chiều vector sai tại {i}: {len(v)} != {EMBED_DIM}")
-                return vecs
+    
+    # ✅ Fixed: Simplified payload handling
+    payload = {"texts": texts}
+    
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()  # Raise exception for HTTP errors
+        
+        data = r.json()
+        vecs = data.get("embeddings") or data.get("vectors") or data.get("data")
+        
+        # Handle response format variations
+        if isinstance(vecs, list) and vecs and isinstance(vecs[0], dict) and "embedding" in vecs[0]:
+            vecs = [item["embedding"] for item in vecs]
+            
+        if not isinstance(vecs, list):
+            raise ValueError(f"Invalid response format: {data}")
+            
+        if len(vecs) != len(texts):
+            if len(texts) > 1 and len(vecs) == 1:
+                vecs = vecs * len(texts)
             else:
-                last_err = f"{r.status_code} {r.text[:300]}"
-        except Exception as e:
-            last_err = str(e)
-    raise HTTPException(500, f"Embedding service lỗi/không tương thích payload. Chi tiết: {last_err}")
+                raise ValueError(f"Vector count ({len(vecs)}) != text count ({len(texts)})")
+                
+        # Validate dimensions
+        for i, v in enumerate(vecs):
+            if not isinstance(v, list) or len(v) != EMBED_DIM:
+                raise ValueError(f"Wrong vector dimension at {i}: {len(v)} != {EMBED_DIM}")
+                
+        return vecs
+        
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(500, f"Embedding service connection error: {e}")
+    except Exception as e:
+        raise HTTPException(500, f"Embedding service error: {e}")
 
 def check_colab_health() -> str:
     if not COLAB_EMBEDDING_URL:
@@ -192,6 +198,7 @@ def health_check():
         "document_count": doc_count,
         "colab_embedding_service": check_colab_health(),
         "gemini_configured": GEMINI_MODEL is not None,
+        "embed_dim": EMBED_DIM,
         "timestamp": datetime.now().isoformat()
     }
 
@@ -270,12 +277,13 @@ def search_similar(req: QueryRequest):
 
 @app.post("/rag")
 def rag(req: QueryRequest):
-    res = search_similar(req)
-    hits = res["results"]
-    ctx = "\n\n---\n\n".join(f"[{i+1}] {h['content']}" for i, h in enumerate(hits)) or "N/A"
-    if not GEMINI_MODEL:
-        raise HTTPException(500, "Gemini API chưa cấu hình")
-    prompt = f"""Bạn là trợ lý AI chuyên về xây dựng tại Việt Nam.
+    try:
+        res = search_similar(req)
+        hits = res["results"]
+        ctx = "\n\n---\n\n".join(f"[{i+1}] {h['content']}" for i, h in enumerate(hits)) or "N/A"
+        if not GEMINI_MODEL:
+            raise HTTPException(500, "Gemini API chưa cấu hình")
+        prompt = f"""Bạn là trợ lý AI chuyên về xây dựng tại Việt Nam.
 
 Câu hỏi: {req.query}
 
@@ -287,14 +295,16 @@ Yêu cầu:
 - Dùng tiếng Việt, ngắn gọn.
 - Trích dẫn [1], [2]... ứng với thứ tự ngữ cảnh khi có thể.
 """.strip()
-    try:
-        resp = GEMINI_MODEL.generate_content(prompt)
-        answer = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
-        if not answer:
-            answer = "Xin lỗi, tôi chưa thể tạo câu trả lời từ ngữ cảnh hiện có."
+        try:
+            resp = GEMINI_MODEL.generate_content(prompt)
+            answer = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if getattr(resp, "candidates", None) else "")
+            if not answer:
+                answer = "Xin lỗi, tôi chưa thể tạo câu trả lời từ ngữ cảnh hiện có."
+        except Exception as e:
+            raise HTTPException(500, f"Lỗi model: {e}")
+        return {"answer": answer, "retrieved": hits}
     except Exception as e:
-        raise HTTPException(500, f"Lỗi model: {e}")
-    return {"answer": answer, "retrieved": hits}
+        raise HTTPException(500, f"RAG error: {e}")
 
 # ===== Document Upload & Processing =====
 class DocumentUploadRequest(BaseModel):
@@ -388,9 +398,6 @@ async def upload_document(req: DocumentUploadRequest):
     except Exception as e:
         raise HTTPException(500, f"Document processing error: {str(e)}")
 
-
-
-
 @app.post("/ingest/url")
 def ingest_url(req: IngestURLReq):
     # 1) Tải file
@@ -422,12 +429,13 @@ def ingest_url(req: IngestURLReq):
     finally:
         cur.close(); conn.close()
 
-
 # ===================== Chat (RAG wrapper) =====================
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    q_vec = embed_via_colab([req.message])[0]
-    hits  = search_similar(q_vec, k=req.top_k)
+    # ✅ Fixed: Use proper search_similar function
+    search_req = QueryRequest(query=req.message, k=req.top_k)
+    search_result = search_similar(search_req)
+    hits = search_result["results"]
 
     # Xây prompt ngữ cảnh
     ctx = "\n\n".join(
@@ -440,8 +448,15 @@ def chat(req: ChatRequest):
         f"[CNTX]\n{ctx}\n\n[CÂU HỎI]\n{req.message}"
     )
 
-    out = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt)
-    answer = out.text
+    if not GEMINI_MODEL:
+        raise HTTPException(500, "Gemini API chưa cấu hình")
+    
+    try:
+        out = GEMINI_MODEL.generate_content(prompt)
+        answer = out.text
+    except Exception as e:
+        raise HTTPException(500, f"Lỗi model: {e}")
+        
     return ChatResponse(
         response=answer,
         sources=[

@@ -1,4 +1,3 @@
-# docker-compose.yml - Updated
 version: '3.8'
 
 services:
@@ -14,35 +13,34 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     
   api:
     build: .
     container_name: rag-api
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://postgres:root@postgres:5432/rag_db
+      - DATABASE_URL=${DATABASE_URL}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - COLAB_EMBEDDING_URL=${COLAB_EMBEDDING_URL}
-      - EMBED_DIM=384  # Đổi từ 768 về 384 cho model tiếng Việt
+      - EMBED_DIM=${EMBED_DIM:-384}
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
     ports:
-      - "8000:8000"  # API chính
+      - "8000:8000"
     volumes:
       - ./app:/app/app
     restart: unless-stopped
-
-  # Thêm embedding service riêng
-  embedding:
-    build: 
-      context: .
-      dockerfile: Dockerfile.embedding
-    container_name: rag-embedding
-    environment:
-      - MODEL_ID=dangvantuan/vietnamese-document-embedding
-      - TOKENIZERS_PARALLELISM=false
-    ports:
-      - "8001:8001"  # Embedding service
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   postgres_data:
