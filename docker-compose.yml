@@ -1,3 +1,4 @@
+# docker-compose.yml - Updated
 version: '3.8'
 
 services:
@@ -14,7 +15,6 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     
-    
   api:
     build: .
     container_name: rag-api
@@ -24,10 +24,24 @@ services:
       - DATABASE_URL=postgresql://postgres:root@postgres:5432/rag_db
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - COLAB_EMBEDDING_URL=${COLAB_EMBEDDING_URL}
+      - EMBED_DIM=384  # Đổi từ 768 về 384 cho model tiếng Việt
     ports:
-      - "8000:8000"
+      - "8000:8000"  # API chính
     volumes:
       - ./app:/app/app
+    restart: unless-stopped
+
+  # Thêm embedding service riêng
+  embedding:
+    build: 
+      context: .
+      dockerfile: Dockerfile.embedding
+    container_name: rag-embedding
+    environment:
+      - MODEL_ID=dangvantuan/vietnamese-document-embedding
+      - TOKENIZERS_PARALLELISM=false
+    ports:
+      - "8001:8001"  # Embedding service
     restart: unless-stopped
 
 volumes:
