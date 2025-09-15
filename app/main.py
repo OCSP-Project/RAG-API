@@ -5,17 +5,23 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 import google.generativeai as genai
+from fastapi.responses import StreamingResponse
+from docling.document_converter import DocumentConverter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import time, io, requests as _rq
 
-APP_TITLE = "OCSP RAG API"; APP_VERSION = "1.0.0"
+APP_TITLE = "OCSP RAG API"
+APP_VERSION = "1.0.0"
 
 DB_URL = os.getenv("URL") or os.getenv("DATABASE_URL") or ""
 COLAB_EMBEDDING_URL = (os.getenv("COLAB_EMBEDDING_URL") or "").rstrip("/")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-EMBED_DIM = 768
+EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 
+# Cấu hình Gemini
 if GEMINI_API_KEY and GEMINI_API_KEY != "your-gemini-key-here":
     genai.configure(api_key=GEMINI_API_KEY)
     try:
@@ -26,15 +32,27 @@ else:
     GEMINI_MODEL = None
 
 app = FastAPI(title=APP_TITLE, version=APP_VERSION)
+
+# CORS: nếu dùng credentials, KHÔNG được dùng "*"
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "")  # ví dụ: https://your-frontend.example.com
+allow_origins = ["*"] if not FRONTEND_ORIGIN else [FRONTEND_ORIGIN]
+allow_credentials = bool(os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true")
+if allow_credentials and allow_origins == ["*"]:
+    # Tự động chuyển sang không credentials nếu bạn vẫn muốn "*"
+    allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# ===================== Pydantic Models =====================
 class DocItem(BaseModel):
     content: str
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class AddDocsRequest(BaseModel):
     docs: List[DocItem]
@@ -49,13 +67,14 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
-    sources: List[Dict] = []
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
 
 class StoreChunkRequest(BaseModel):
     content: str
     embedding: List[float]
-    metadata: Dict[str, Any] = {}
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
+# ===================== DB Helpers =====================
 def get_db_connection():
     if not DB_URL:
         raise HTTPException(500, "DB URL chưa cấu hình (env URL hoặc DATABASE_URL).")
@@ -67,6 +86,12 @@ def get_db_connection():
 def _vec_to_pg(v: List[float]) -> str:
     return "[" + ",".join(f"{float(x):.6f}" for x in v) + "]"
 
+
+class IngestURLReq(BaseModel):
+    url: str
+    chunk_size: int = 1200
+    chunk_overlap: int = 150
+# ===================== Embedding Service =====================
 def embed_via_colab(texts: List[str]) -> List[List[float]]:
     if not COLAB_EMBEDDING_URL:
         raise HTTPException(500, "COLAB_EMBEDDING_URL chưa cấu hình")
@@ -74,7 +99,7 @@ def embed_via_colab(texts: List[str]) -> List[List[float]]:
     headers = {"Content-Type": "application/json"}
     tries = [
         {"json": {"texts": texts}},
-        {"json": {"text": texts[0] if len(texts)==1 else "\n".join(texts)}},
+        {"json": {"text": texts[0] if len(texts) == 1 else "\n".join(texts)}},
         {"json": {"inputs": texts}},
     ]
     last_err = None
@@ -84,6 +109,7 @@ def embed_via_colab(texts: List[str]) -> List[List[float]]:
             if r.status_code == 200:
                 data = r.json()
                 vecs = data.get("vectors") or data.get("embeddings") or data.get("data")
+                # Một số service trả [{"embedding": [...]}]
                 if isinstance(vecs, list) and vecs and isinstance(vecs[0], dict) and "embedding" in vecs[0]:
                     vecs = [item["embedding"] for item in vecs]
                 if not isinstance(vecs, list):
@@ -95,7 +121,7 @@ def embed_via_colab(texts: List[str]) -> List[List[float]]:
                         raise ValueError(f"Độ dài vectors ({len(vecs)}) != texts ({len(texts)})")
                 for i, v in enumerate(vecs):
                     if not isinstance(v, list) or len(v) != EMBED_DIM:
-                        raise ValueError(f"Chiều vector sai tại {i}")
+                        raise ValueError(f"Chiều vector sai tại {i}: {len(v)} != {EMBED_DIM}")
                 return vecs
             else:
                 last_err = f"{r.status_code} {r.text[:300]}"
@@ -112,12 +138,17 @@ def check_colab_health() -> str:
     except Exception:
         return "disconnected"
 
+# ===================== Startup =====================
 @app.on_event("startup")
 def on_startup():
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        try:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        except Exception as e:
+            # Không dừng app nếu thiếu quyền; log warning
+            print(f"[startup] WARNING: cannot create extension vector: {e}")
         cur.execute(f"""
         CREATE TABLE IF NOT EXISTS document_chunks (
             id BIGSERIAL PRIMARY KEY,
@@ -137,6 +168,7 @@ def on_startup():
     finally:
         conn.close()
 
+# ===================== Health & Root =====================
 @app.get("/")
 def root():
     return {"message": f"{APP_TITLE} is running!", "version": APP_VERSION, "docs": "/docs"}
@@ -144,10 +176,12 @@ def root():
 @app.get("/health")
 def health_check():
     try:
-        conn = get_db_connection(); cur = conn.cursor()
+        conn = get_db_connection()
+        cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM document_chunks;")
         doc_count = cur.fetchone()[0]
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
         db_status = "connected"
     except Exception as e:
         doc_count = 0
@@ -161,6 +195,7 @@ def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
+# ===================== Core Endpoints =====================
 @app.post("/add_docs")
 def add_docs(req: AddDocsRequest):
     if not req.docs:
@@ -185,7 +220,8 @@ def add_docs(req: AddDocsRequest):
         conn.rollback()
         raise HTTPException(500, str(e))
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
 
 @app.post("/store-chunk")
 def store_chunk(request: StoreChunkRequest):
@@ -207,7 +243,8 @@ def store_chunk(request: StoreChunkRequest):
         conn.rollback()
         raise HTTPException(500, str(e))
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
 
 @app.post("/search-similar")
 def search_similar(req: QueryRequest):
@@ -228,7 +265,8 @@ def search_similar(req: QueryRequest):
             for r in rows
         ]}
     finally:
-        cur.close(); conn.close()
+        cur.close()
+        conn.close()
 
 @app.post("/rag")
 def rag(req: QueryRequest):
@@ -237,8 +275,7 @@ def rag(req: QueryRequest):
     ctx = "\n\n---\n\n".join(f"[{i+1}] {h['content']}" for i, h in enumerate(hits)) or "N/A"
     if not GEMINI_MODEL:
         raise HTTPException(500, "Gemini API chưa cấu hình")
-    prompt = f"""
-Bạn là trợ lý AI chuyên về xây dựng tại Việt Nam.
+    prompt = f"""Bạn là trợ lý AI chuyên về xây dựng tại Việt Nam.
 
 Câu hỏi: {req.query}
 
@@ -258,7 +295,6 @@ Yêu cầu:
     except Exception as e:
         raise HTTPException(500, f"Lỗi model: {e}")
     return {"answer": answer, "retrieved": hits}
-
 
 # ===== Document Upload & Processing =====
 class DocumentUploadRequest(BaseModel):
@@ -283,10 +319,10 @@ async def upload_document(req: DocumentUploadRequest):
         start_time = time.time()
         result = converter.convert(req.source)
         end_time = time.time()
-        
+
         # Export to markdown
         markdown_content = result.document.export_to_markdown()
-        
+
         # Split into chunks
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=req.chunk_size,
@@ -294,9 +330,8 @@ async def upload_document(req: DocumentUploadRequest):
             length_function=len,
             separators=["\n\n", "\n", " ", ""]
         )
-        
         chunks = text_splitter.split_text(markdown_content)
-        
+
         # Create docs for embedding
         docs = []
         for i, chunk in enumerate(chunks):
@@ -310,12 +345,12 @@ async def upload_document(req: DocumentUploadRequest):
                     "timestamp": datetime.now().isoformat()
                 }
             })
-        
+
         # Embed và store chunks
         if docs:
             texts = [d["content"] for d in docs]
             vecs = embed_via_colab(texts)
-            
+
             conn = get_db_connection()
             cur = conn.cursor()
             try:
@@ -332,7 +367,7 @@ async def upload_document(req: DocumentUploadRequest):
                     )
                     ids.append(cur.fetchone()[0])
                 conn.commit()
-                
+
                 return {
                     "message": "Document processed successfully",
                     "source": req.source,
@@ -345,33 +380,146 @@ async def upload_document(req: DocumentUploadRequest):
                 conn.rollback()
                 raise HTTPException(500, f"Database error: {str(e)}")
             finally:
-                cur.close(); conn.close()
+                cur.close()
+                conn.close()
         else:
-            return {
-                "message": "No content to process",
-                "source": req.source
-            }
-            
+            return {"message": "No content to process", "source": req.source}
+
     except Exception as e:
         raise HTTPException(500, f"Document processing error: {str(e)}")
 
-@app.post("/chat", response_model=ChatResponse)
-def chat_endpoint(request: ChatRequest):
+
+
+
+@app.post("/ingest/url")
+def ingest_url(req: IngestURLReq):
+    # 1) Tải file
+    resp = _rq.get(req.url, timeout=60)
+    resp.raise_for_status()
+    # 2) Docling convert
+    conv = DocumentConverter()
+    result = conv.convert(io.BytesIO(resp.content))
+    md = result.document.export_to_markdown()
+
+    # 3) Chunk
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=req.chunk_size, chunk_overlap=req.chunk_overlap,
+        separators=["\n\n","\n"," ",""]
+    )
+    chunks = splitter.split_text(md)
+
+    # 4) Embed + lưu
+    vecs = embed_via_colab(chunks)
+    conn = get_db_connection(); cur = conn.cursor()
     try:
-        rag_response = rag(QueryRequest(query=request.message, k=3))
-        return ChatResponse(
-            response=rag_response["answer"],
-            sources=[
-                {
-                    "type": hit.get("metadata", {}).get("type", "unknown"),
-                    "content": (hit["content"][:200] + "...") if hit.get("content") else "",
-                    "score": hit.get("score")
-                }
-                for hit in rag_response.get("retrieved", [])
-            ]
-        )
-    except Exception as e:
-        return ChatResponse(
-            response=f"Xin lỗi, tôi gặp lỗi khi xử lý câu hỏi: {str(e)}",
-            sources=[]
-        )
+        for c,v in zip(chunks, vecs):
+            cur.execute("""
+              INSERT INTO document_chunks(content, embedding, metadata)
+              VALUES (%s, %s::vector, %s)
+            """, (c, _vec_to_pg(v), json.dumps({"source": req.url})))
+        conn.commit()
+        return {"ok": True, "chunks": len(chunks)}
+    finally:
+        cur.close(); conn.close()
+
+
+# ===================== Chat (RAG wrapper) =====================
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    q_vec = embed_via_colab([req.message])[0]
+    hits  = search_similar(q_vec, k=req.top_k)
+
+    # Xây prompt ngữ cảnh
+    ctx = "\n\n".join(
+        f"[{i+1}] {h['content']}" for i,h in enumerate(hits)
+    ) or "—"
+    prompt = (
+        "Bạn là trợ lý tư vấn nhà thầu xây dựng, bạn tư vấn thông tin các nhà thầu có trong hệ thống, chỉ dùng thông tin trong [CNTX]. "
+        "Nếu không chắc thì nói 'chưa đủ dữ liệu'. "
+        "Luôn ghi nguồn [1],[2]...\n\n"
+        f"[CNTX]\n{ctx}\n\n[CÂU HỎI]\n{req.message}"
+    )
+
+    out = genai.GenerativeModel("gemini-1.5-flash").generate_content(prompt)
+    answer = out.text
+    return ChatResponse(
+        response=answer,
+        sources=[
+            {"id": int(h["id"]), "score": float(h["score"]), "source": (h.get("metadata") or {}).get("source")}
+            for h in hits
+        ],
+    )
+
+# ===================== SSE Streaming Chat =====================
+def _build_rag_prompt(question: str, hits: list) -> str:
+    ctx_blocks = []
+    for i, h in enumerate(hits, 1):
+        md = h.get("metadata") or {}
+        src = md.get("source") or md.get("url") or md.get("path")
+        snippet = h.get("content") or ""
+        if len(snippet) > 1200:
+            snippet = snippet[:1200] + "..."
+        ctx_blocks.append(f"[{i}] (source: {src or 'N/A'})\n{snippet}")
+    context = "\n\n".join(ctx_blocks) if ctx_blocks else "—"
+    return f"""Bạn là trợ lý kỹ thuật xây dựng, trả lời ngắn gọn, bám sát ngữ cảnh.
+Nếu thiếu thông tin thì nói 'mình không chắc từ tài liệu'.
+Cuối câu trả lời nên liệt kê nguồn theo dạng [1], [2] tương ứng đoạn đã dùng.
+
+[CNTX]
+{context}
+
+[CÂU HỎI]
+{question}
+"""
+
+@app.get("/chat/stream")
+def chat_stream(q: str, k: int = 5):
+    """Server-Sent Events: stream câu trả lời LLM theo thời gian thực"""
+    if not GEMINI_MODEL:
+        raise HTTPException(500, "GEMINI_API_KEY chưa cấu hình")
+
+    # 1) Embed + retrieve
+    q_vec = embed_via_colab([q])[0]
+    v_str = _vec_to_pg(q_vec)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, content, metadata, 1 - (embedding <=> %s::vector) AS score
+            FROM document_chunks
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """, (v_str, v_str, k))
+        hits = cur.fetchall()
+    finally:
+        cur.close()
+        conn.close()
+
+    prompt = _build_rag_prompt(q, hits)
+
+    def event_gen():
+        # Gửi nguồn trước
+        try:
+            import json as _json
+            yield "event: sources\n"
+            yield "data: " + _json.dumps([
+                {"id": int(h["id"]), "score": float(h["score"]), "source": (h.get("metadata") or {}).get("source")}
+                for h in hits
+            ]) + "\n\n"
+        except Exception:
+            # Không chặn stream nếu lỗi serialize nguồn
+            pass
+
+        # 2) Stream từ Gemini
+        try:
+            for chunk in GEMINI_MODEL.generate_content(prompt, stream=True):
+                txt = getattr(chunk, "text", "") or ""
+                if txt:
+                    # Mỗi message là một 'data: ...\n\n' theo SSE
+                    yield "data: " + txt + "\n\n"
+        except Exception as e:
+            yield f"event: error\ndata: {str(e)}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
