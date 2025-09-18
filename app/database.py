@@ -23,7 +23,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS document_chunks (
             id SERIAL PRIMARY KEY,
             content TEXT NOT NULL,
-            embedding vector(384),
+            embedding vector(768),
             metadata JSONB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
