@@ -13,6 +13,11 @@ from docling.document_converter import DocumentConverter
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time, io, requests as _rq
 
+import logging
+logger = logging.getLogger("rag-api")
+logger.setLevel(logging.INFO)
+
+
 APP_TITLE = "OCSP RAG API"
 APP_VERSION = "1.0.0"
 
@@ -316,7 +321,7 @@ class DocumentUploadRequest(BaseModel):
 async def upload_document(req: DocumentUploadRequest):
     """Upload và parse document từ URL bằng IBM Docling"""
     try:
-        # Import docling (cần cài trong container)
+        
         try:
             from docling.document_converter import DocumentConverter
             from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -431,38 +436,148 @@ def ingest_url(req: IngestURLReq):
 # ===================== Chat (RAG wrapper) =====================
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    # ✅ Fixed: Use proper search_similar function
-    search_req = QueryRequest(query=req.message, k=req.top_k)
-    search_result = search_similar(search_req)
-    hits = search_result["results"]
-
-    # Xây prompt ngữ cảnh
-    ctx = "\n\n".join(
-        f"[{i+1}] {h['content']}" for i,h in enumerate(hits)
-    ) or "—"
-    prompt = (
-        "Bạn là trợ lý tư vấn nhà thầu xây dựng, bạn tư vấn thông tin các nhà thầu có trong hệ thống, chỉ dùng thông tin trong [CNTX]. "
-        "Nếu không chắc thì nói 'chưa đủ dữ liệu'. "
-        "Luôn ghi nguồn [1],[2]...\n\n"
-        f"[CNTX]\n{ctx}\n\n[CÂU HỎI]\n{req.message}"
-    )
-
-    if not GEMINI_MODEL:
-        raise HTTPException(500, "Gemini API chưa cấu hình")
+    logger.info(f"Chat request received: {req.message}")
     
     try:
-        out = GEMINI_MODEL.generate_content(prompt)
-        answer = out.text
-    except Exception as e:
-        raise HTTPException(500, f"Lỗi model: {e}")
+        # Check if database has documents first
+        conn = get_db_connection()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT COUNT(*) FROM document_chunks;")
+            doc_count = cur.fetchone()[0]
+            
+            if doc_count == 0:
+                return ChatResponse(
+                    response="Chào bạn! Hiện tại hệ thống chưa có dữ liệu về các nhà thầu. Bạn có thể upload tài liệu hoặc liên hệ admin để cập nhật thông tin nhé! 😊",
+                    sources=[]
+                )
+        finally:
+            cur.close()
+            conn.close()
         
-    return ChatResponse(
-        response=answer,
-        sources=[
-            {"id": int(h["id"]), "score": float(h["score"]), "source": (h.get("metadata") or {}).get("source")}
-            for h in hits
-        ],
-    )
+        # Search for similar documents with lower threshold
+        search_req = QueryRequest(query=req.message, k=req.top_k)
+        search_result = search_similar(search_req)
+        hits = search_result["results"]
+        
+        # Build context with more details
+        if hits:
+            ctx_parts = []
+            for i, h in enumerate(hits, 1):
+                content = h['content'].strip()
+                metadata = h.get('metadata', {})
+                source_info = f" (Nguồn: {metadata.get('source', 'database')})" if metadata.get('source') else ""
+                ctx_parts.append(f"[{i}] {content}{source_info}")
+            context = "\n\n".join(ctx_parts)
+        else:
+            context = "Không tìm thấy thông tin liên quan trong cơ sở dữ liệu."
+
+        # Enhanced friendly consultant prompt
+        prompt = f"""
+Bạn là Minh - một tư vấn viên chuyên nghiệp và thân thiện về xây dựng tại Đà Nẵng. 
+
+PHONG CÁCH TRAO ĐỔI:
+- Gọi khách hàng là "anh/chị" một cách lịch sự
+- Nhiệt tình, chu đáo như nhân viên tư vấn thực tế  
+- Khi thiếu thông tin: hỏi thêm chi tiết để tư vấn chính xác hơn
+- Luôn đưa ra gợi ý cụ thể và thiết thực
+- Kết thúc bằng câu hỏi mở để tiếp tục hỗ trợ
+
+QUY TẮC TRẢ LỜI:
+- Dựa vào thông tin trong [NGỮ CẢNH] để tư vấn
+- Nếu thiếu thông tin: "Để tư vấn chính xác hơn, anh/chị có thể cho mình biết thêm..."
+- Luôn trích dẫn nguồn [1], [2] khi có thông tin cụ thể
+- Đề xuất 2-3 lựa chọn phù hợp nhất với yêu cầu
+
+[NGỮ CẢNH]
+{context}
+
+[CÂU HỎI KHÁCH HÀNG]
+{req.message}
+
+Hãy trả lời như một tư vấn viên chuyên nghiệp:
+        """.strip()
+
+        if not GEMINI_MODEL:
+            raise HTTPException(500, "Gemini API chưa cấu hình")
+        
+        try:
+            out = GEMINI_MODEL.generate_content(prompt)
+            answer = out.text
+            
+            # Add fallback if still generic response
+            if "chưa đủ dữ liệu" in answer.lower() and hits:
+                answer = f"""
+Chào anh/chị! Mình đã tìm thấy một số thông tin liên quan trong hệ thống. 
+
+{answer}
+
+Để mình có thể tư vấn chính xác hơn, anh/chị có thể chia sẻ thêm:
+- Loại công trình muốn xây (nhà phố, biệt thự, cao ốc...)
+- Khu vực cụ thể tại Đà Nẵng
+- Thời gian dự kiến khởi công
+
+Mình sẽ giúp anh/chị tìm nhà thầu phù hợp nhất! 😊
+                """.strip()
+                
+        except Exception as e:
+            logger.error(f"Gemini error: {e}")
+            answer = "Xin lỗi anh/chị, hệ thống đang gặp chút trục trặc. Anh/chị vui lòng thử lại sau một chút nhé! 🙏"
+            
+        return ChatResponse(
+            response=answer,
+            sources=[
+                {
+                    "id": int(h["id"]), 
+                    "score": float(h["score"]), 
+                    "source": (h.get("metadata") or {}).get("source", "database")
+                }
+                for h in hits
+            ],
+        )
+        
+    except Exception as e:
+        logger.error(f"Chat endpoint error: {e}")
+        return ChatResponse(
+            response="Xin lỗi anh/chị, mình đang gặp chút vấn đề kỹ thuật. Anh/chị thử lại sau nhé! 😊",
+            sources=[]
+        )
+    
+
+
+@app.post("/debug/search-detailed")
+def debug_search_detailed(req: QueryRequest):
+    """Debug search with detailed scoring"""
+    q_vec = embed_via_colab([req.query])[0]
+    v_str = _vec_to_pg(q_vec)
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cur.execute("""
+            SELECT id, content, metadata, 
+                   1 - (embedding <=> %s::vector) AS score,
+                   embedding <=> %s::vector AS distance
+            FROM document_chunks
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """, (v_str, v_str, v_str, req.k))
+        rows = cur.fetchall()
+        return {
+            "query": req.query, 
+            "results": [
+                {
+                    "id": r["id"], 
+                    "content": r["content"][:200] + "..." if len(r["content"]) > 200 else r["content"],
+                    "metadata": r["metadata"], 
+                    "score": float(r["score"]),
+                    "distance": float(r["distance"])
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        cur.close()
+        conn.close()    
 
 # ===================== SSE Streaming Chat =====================
 def _build_rag_prompt(question: str, hits: list) -> str:
