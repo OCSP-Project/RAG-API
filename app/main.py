@@ -214,9 +214,78 @@ def extract_contractor_info(chunks: List[dict]) -> List[ContractorAction]:
                 except (IndexError, ValueError) as e:
                     logger.error(f"Error parsing contractor row: {e}")
                     continue
-    
-   
-    return contractors[:3]  # Giới hạn tối đa 3 nhà thầu
+        return contractors[:3]  # Giới hạn tối đa 3 nhà thầu
+
+def simple_keyword_search(query: str, k: int = 5) -> List[dict]:
+    """Simple keyword search fallback"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        # Basic keyword matching
+        keywords = []
+        query_lower = query.lower()
+        
+        # Budget keywords
+        if "3 tỷ" in query_lower or "3000000000" in query_lower:
+            keywords.extend(["1500000000", "3000000000", "4000000000", "6000000000"])
+        if "2 tỷ" in query_lower:
+            keywords.extend(["1000000000", "1500000000", "2000000000"])
+        if "dưới 2 tỷ" in query_lower:
+            keywords.extend(["1000000000", "1200000000", "1500000000"])
+            
+        # Company names
+        companies = ["DNG", "SBS", "Group 4N", "CDC", "Tín An"]
+        
+        # Location
+        if "đà nẵng" in query_lower or "da nang" in query_lower:
+            keywords.append("Da Nang")
+            
+        # Build search conditions
+        conditions = []
+        params = []
+        
+        for keyword in keywords:
+            conditions.append("content ILIKE %s")
+            params.append(f"%{keyword}%")
+            
+        for company in companies:
+            conditions.append("content ILIKE %s") 
+            params.append(f"%{company}%")
+            
+        # If no specific keywords, search all
+        if not conditions:
+            conditions = ["content IS NOT NULL"]
+            
+        where_clause = " OR ".join(conditions)
+        sql = f"""
+            SELECT id, content, metadata, 0.8 as score
+            FROM document_chunks 
+            WHERE {where_clause}
+            ORDER BY id
+            LIMIT %s
+        """
+        params.append(k)
+        
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        
+        return [
+            {
+                "id": r["id"],
+                "content": r["content"],
+                "metadata": r["metadata"],
+                "score": float(r["score"])
+            }
+            for r in rows
+        ]
+        
+    except Exception as e:
+        logger.error(f"Keyword search error: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
 # ===================== Startup =====================
 @app.on_event("startup")
 def on_startup():
@@ -502,87 +571,66 @@ def ingest_url(req: IngestURLReq):
         cur.close(); conn.close()
 
 # ===================== Chat (RAG wrapper) =====================
-@app.post("/chat", response_model=EnhancedChatResponse)
-def enhanced_chat(req: ChatRequest):
+@app.post("/chat", response_model=ChatResponse)
+def chat_with_simple_fallback(req: ChatRequest):
     try:
-        # Check database
-        conn = get_db_connection()
-        cur = conn.cursor()
+        # Try embedding search first
         try:
-            cur.execute("SELECT COUNT(*) FROM document_chunks;")
-            doc_count = cur.fetchone()[0]
-            if doc_count == 0:
-                return EnhancedChatResponse(
-                    response="Chào bạn! Hệ thống chưa có dữ liệu nhà thầu. Vui lòng thêm dữ liệu nhé!",
-                    contractors=[],
-                    has_recommendations=False
-                )
-        finally:
-            cur.close()
-            conn.close()
-        
-        # Search for similar documents
-        search_req = QueryRequest(query=req.message, k=req.top_k)
-        search_result = search_similar(search_req)
-        hits = search_result["results"]
-
-        # Extract contractor information với UUID
-        contractors = extract_contractor_info(hits)
-
-        # Build context
+            search_req = QueryRequest(query=req.message, k=req.top_k)
+            search_result = search_similar(search_req)
+            hits = search_result["results"]
+        except:
+            hits = []
+            
+        # If no results from embedding, use keyword fallback
+        if not hits:
+            logger.info(f"Embedding failed, using keyword fallback for: {req.message}")
+            hits = simple_keyword_search(req.message, req.top_k)
+            
+        # Build response
         if hits:
-            ctx_parts = []
-            for i, h in enumerate(hits, 1):
-                content = h['content'].strip()[:400]
-                ctx_parts.append(f"[{i}] {content}")
-            context = "\n\n".join(ctx_parts)
+            # Simple response format (chưa extract contractor info)
+            ctx = "\n\n".join([f"[{i+1}] {h['content'][:200]}..." for i, h in enumerate(hits)])
         else:
-            context = "Không tìm thấy thông tin phù hợp."
+            ctx = "Không tìm thấy thông tin phù hợp."
 
-        # Enhanced prompt
         prompt = f"""
-Bạn là tư vấn viên nhà thầu thân thiện. 
-
-CÁCH TRẢ LỜI:
-- Ngắn gọn 2-3 câu
-- Nếu tìm thấy nhà thầu phù hợp: giới thiệu ngắn gọn + "Xem chi tiết bên dưới"  
-- Không lặp lại thông tin chi tiết (sẽ hiển thị ở contractor cards)
-- Trích dẫn [1],[2] khi cần
+Bạn là tư vấn viên nhà thầu. Trả lời ngắn gọn 2-3 câu dựa trên thông tin. nếu không đủ dữ liệu thì nói "bạn hãy cung cấp thêm thông về khả năng tài chính hoặc loại công trình mong muốn".
 
 [THÔNG TIN]
-{context}
+{ctx}
 
-[CÂU HỎI] 
+[CÂU HỎI]
 {req.message}
 
-Trả lời ngắn gọn:
+Trả lời:
         """.strip()
 
-        if not GEMINI_MODEL:
-            raise HTTPException(500, "Gemini chưa sẵn sàng")
-        
-        try:
-            out = GEMINI_MODEL.generate_content(prompt)
-            answer = out.text or "Đang tìm nhà thầu phù hợp..."
-        except Exception as e:
-            logger.error(f"Gemini error: {e}")
-            answer = "Có lỗi xảy ra khi tạo câu trả lời."
-        
-        return EnhancedChatResponse(
-            response=answer,
-            sources=[{"id": int(h["id"]), "score": float(h["score"])} for h in hits],
-            contractors=contractors,
-            has_recommendations=len(contractors) > 0
-        )
+        if GEMINI_MODEL:
+            try:
+                out = GEMINI_MODEL.generate_content(prompt)
+                answer = out.text or "Đang xử lý yêu cầu của bạn..."
+            except Exception as e:
+                logger.error(f"Gemini error: {e}")
+                answer = "Có lỗi với AI, nhưng tôi tìm thấy một số nhà thầu phù hợp."
+        else:
+            answer = "Gemini chưa được cấu hình."
+            
+        return {
+            "response": answer,
+            "sources": [{"id": int(h["id"]), "score": float(h.get("score", 0))} for h in hits],
+            "contractors": [],  # Tạm thời chưa extract
+            "has_recommendations": len(hits) > 0
+        }
         
     except Exception as e:
-        logger.error(f"Enhanced chat error: {e}")
-        return EnhancedChatResponse(
-            response="Có lỗi xảy ra, thử lại sau nhé!",
-            contractors=[],
-            has_recommendations=False
-        )
-
+        logger.error(f"Chat fallback error: {e}")
+        return {
+            "response": "Có lỗi xảy ra, thử lại sau nhé!",
+            "sources": [],
+            "contractors": [],
+            "has_recommendations": False
+        }
 
 @app.post("/debug/search-detailed")
 def debug_search_detailed(req: QueryRequest):
