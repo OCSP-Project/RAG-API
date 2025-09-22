@@ -169,23 +169,22 @@ def check_colab_health() -> str:
 
 
 def extract_contractor_info(chunks: List[dict]) -> List[ContractorAction]:
-    """Extract contractor information from RAG chunks với UUID mapping"""
+    """Extract contractor information với UUID và URLs"""
     contractors = []
     
     for chunk in chunks:
         content = chunk.get('content', '')
         
-        # Parse table row với format mới: | STT | ID | Tên | Slug | Description | Lĩnh vực | Ngân sách | Khu vực | Đánh giá |
-        if '|' in content and any(uuid_pattern in content for uuid_pattern in ['0fa72a73', 'fd268472', '8c7628fd']):
+        # Parse table format: | STT | UUID | Tên | Code | Description | Lĩnh vực | Ngân sách | Khu vực | Đánh giá |
+        if '|' in content and any(uuid in content for uuid in ['0fa72a73', '8c7628fd', 'fd268472']):
             parts = [p.strip() for p in content.split('|') if p.strip()]
             
-            if len(parts) >= 9:  # Đủ columns theo format mới
+            if len(parts) >= 9:
                 try:
-                    # Parse theo thứ tự columns
                     stt = parts[0]
-                    contractor_id = parts[1]  # UUID từ backend DB
+                    contractor_id = parts[1]  # UUID from backend
                     name = parts[2]
-                    slug = parts[3] 
+                    code = parts[3]
                     description = parts[4]
                     specialty = parts[5]
                     budget = parts[6]
@@ -193,28 +192,30 @@ def extract_contractor_info(chunks: List[dict]) -> List[ContractorAction]:
                     rating_str = parts[8]
                     
                     # Parse rating
-                    rating = float(rating_str) if rating_str.replace('.', '').isdigit() else 4.0
+                    rating = float(rating_str) if rating_str.replace('.', '').replace(',', '').isdigit() else 4.0
                     
-                    # Tạo URLs với UUID
+                    # Frontend URLs
                     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
                     
                     contractor = ContractorAction(
                         contractor_id=contractor_id,
                         contractor_name=name,
-                        contractor_slug=slug,
+                        contractor_slug=code,  # Use code as slug
                         description=description,
                         budget_range=budget,
                         rating=rating,
+                        specialties=[specialty],
                         location=location,
                         profile_url=f"{FRONTEND_URL}/contractors/{contractor_id}",
-                        contact_url=f"{FRONTEND_URL}/contractors/{contractor_id}/contact"
+                        contact_url=f"{FRONTEND_URL}/contractors/{contractor_id}?action=contact"
                     )
                     contractors.append(contractor)
                     
                 except (IndexError, ValueError) as e:
-                    logger.error(f"Error parsing contractor row: {e}")
+                    logger.error(f"Error parsing contractor: {e}")
                     continue
-        return contractors[:3]  # Giới hạn tối đa 3 nhà thầu
+    
+    return contractors[:3] 
 
 def simple_keyword_search(query: str, k: int = 5) -> List[dict]:
     """Simple keyword search fallback"""
@@ -571,66 +572,67 @@ def ingest_url(req: IngestURLReq):
         cur.close(); conn.close()
 
 # ===================== Chat (RAG wrapper) =====================
-@app.post("/chat", response_model=ChatResponse)
-def chat_with_simple_fallback(req: ChatRequest):
+@app.post("/chat", response_model=EnhancedChatResponse)
+def enhanced_chat_with_contractors(req: ChatRequest):
     try:
-        # Try embedding search first
-        try:
-            search_req = QueryRequest(query=req.message, k=req.top_k)
-            search_result = search_similar(search_req)
-            hits = search_result["results"]
-        except:
-            hits = []
-            
-        # If no results from embedding, use keyword fallback
-        if not hits:
-            logger.info(f"Embedding failed, using keyword fallback for: {req.message}")
-            hits = simple_keyword_search(req.message, req.top_k)
-            
+        # Existing keyword search logic...
+        hits = simple_keyword_search(req.message, req.top_k)
+        
+        # Extract contractors with URLs
+        contractors = extract_contractor_info(hits) if hits else []
+        
         # Build response
-        if hits:
-            # Simple response format (chưa extract contractor info)
-            ctx = "\n\n".join([f"[{i+1}] {h['content'][:200]}..." for i, h in enumerate(hits)])
-        else:
-            ctx = "Không tìm thấy thông tin phù hợp."
+        if contractors:
+            ctx = "\n\n".join([f"[{i+1}] {h['content'][:300]}..." for i, h in enumerate(hits)])
+            
+            # Improved prompt to mention specific contractors
+            contractor_names = [c.contractor_name for c in contractors]
+            prompt = f"""
+Bạn là tư vấn viên nhà thầu thân thiện. 
 
-        prompt = f"""
-Bạn là tư vấn viên nhà thầu. Trả lời ngắn gọn 2-3 câu dựa trên thông tin. nếu không đủ dữ liệu thì nói "bạn hãy cung cấp thêm thông về khả năng tài chính hoặc loại công trình mong muốn".
+Với thông tin có sẵn, tôi GỢI Ý các nhà thầu sau: {', '.join(contractor_names)}
 
-[THÔNG TIN]
+[THÔNG TIN CHI TIẾT]
 {ctx}
 
-[CÂU HỎI]
+[YÊU CẦU KHÁCH HÀNG]
 {req.message}
 
-Trả lời:
-        """.strip()
+Hãy giới thiệu ngắn gọn (2-3 câu) về độ phù hợp và nói "Xem chi tiết bên dưới":
+            """.strip()
+        else:
+            ctx = "Không tìm thấy nhà thầu phù hợp."
+            prompt = f"""
+Tôi không tìm thấy nhà thầu phù hợp với yêu cầu: {req.message}
 
+Hãy hỏi thêm thông tin để tư vấn tốt hơn:
+            """.strip()
+
+        # Generate AI response
         if GEMINI_MODEL:
             try:
                 out = GEMINI_MODEL.generate_content(prompt)
-                answer = out.text or "Đang xử lý yêu cầu của bạn..."
+                answer = out.text or "Đang tìm nhà thầu phù hợp..."
             except Exception as e:
                 logger.error(f"Gemini error: {e}")
-                answer = "Có lỗi với AI, nhưng tôi tìm thấy một số nhà thầu phù hợp."
+                answer = "Tìm thấy một số nhà thầu phù hợp. Xem chi tiết bên dưới."
         else:
-            answer = "Gemini chưa được cấu hình."
+            answer = "Hệ thống AI chưa sẵn sàng."
             
-        return {
-            "response": answer,
-            "sources": [{"id": int(h["id"]), "score": float(h.get("score", 0))} for h in hits],
-            "contractors": [],  # Tạm thời chưa extract
-            "has_recommendations": len(hits) > 0
-        }
+        return EnhancedChatResponse(
+            response=answer,
+            sources=[{"id": int(h["id"]), "score": float(h.get("score", 0))} for h in hits],
+            contractors=contractors,
+            has_recommendations=len(contractors) > 0
+        )
         
     except Exception as e:
-        logger.error(f"Chat fallback error: {e}")
-        return {
-            "response": "Có lỗi xảy ra, thử lại sau nhé!",
-            "sources": [],
-            "contractors": [],
-            "has_recommendations": False
-        }
+        logger.error(f"Enhanced chat error: {e}")
+        return EnhancedChatResponse(
+            response="Có lỗi xảy ra, thử lại sau nhé!",
+            contractors=[],
+            has_recommendations=False
+        )
 
 @app.post("/debug/search-detailed")
 def debug_search_detailed(req: QueryRequest):
