@@ -5,3 +5,8 @@ __pycache__/
 postgres_data/
 rag-api_postgres_data/
 .DS_Store
+
+
+# curl http://localhost:8000/health
+
+# docker compose logs -f api

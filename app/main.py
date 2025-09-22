@@ -12,7 +12,8 @@ from fastapi.responses import StreamingResponse
 from docling.document_converter import DocumentConverter
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time, io, requests as _rq
-
+from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, Field
 import logging
 logger = logging.getLogger("rag-api")
 logger.setLevel(logging.INFO)
@@ -65,6 +66,23 @@ class AddDocsRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     k: int = 5
+
+class ContractorAction(BaseModel):
+    contractor_id: str  # UUID từ backend DB
+    contractor_name: str
+    contractor_slug: str
+    description: str
+    budget_range: str
+    rating: float
+    location: str
+    profile_url: str
+    contact_url: str
+
+class EnhancedChatResponse(BaseModel):
+    response: str
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    contractors: List[ContractorAction] = Field(default_factory=list)
+    has_recommendations: bool = False
 
 class ChatRequest(BaseModel):
     message: str
@@ -149,6 +167,56 @@ def check_colab_health() -> str:
     except Exception:
         return "disconnected"
 
+
+def extract_contractor_info(chunks: List[dict]) -> List[ContractorAction]:
+    """Extract contractor information from RAG chunks với UUID mapping"""
+    contractors = []
+    
+    for chunk in chunks:
+        content = chunk.get('content', '')
+        
+        # Parse table row với format mới: | STT | ID | Tên | Slug | Description | Lĩnh vực | Ngân sách | Khu vực | Đánh giá |
+        if '|' in content and any(uuid_pattern in content for uuid_pattern in ['0fa72a73', 'fd268472', '8c7628fd']):
+            parts = [p.strip() for p in content.split('|') if p.strip()]
+            
+            if len(parts) >= 9:  # Đủ columns theo format mới
+                try:
+                    # Parse theo thứ tự columns
+                    stt = parts[0]
+                    contractor_id = parts[1]  # UUID từ backend DB
+                    name = parts[2]
+                    slug = parts[3] 
+                    description = parts[4]
+                    specialty = parts[5]
+                    budget = parts[6]
+                    location = parts[7]
+                    rating_str = parts[8]
+                    
+                    # Parse rating
+                    rating = float(rating_str) if rating_str.replace('.', '').isdigit() else 4.0
+                    
+                    # Tạo URLs với UUID
+                    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+                    
+                    contractor = ContractorAction(
+                        contractor_id=contractor_id,
+                        contractor_name=name,
+                        contractor_slug=slug,
+                        description=description,
+                        budget_range=budget,
+                        rating=rating,
+                        location=location,
+                        profile_url=f"{FRONTEND_URL}/contractors/{contractor_id}",
+                        contact_url=f"{FRONTEND_URL}/contractors/{contractor_id}/contact"
+                    )
+                    contractors.append(contractor)
+                    
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Error parsing contractor row: {e}")
+                    continue
+    
+   
+    return contractors[:3]  # Giới hạn tối đa 3 nhà thầu
 # ===================== Startup =====================
 @app.on_event("startup")
 def on_startup():
@@ -434,115 +502,86 @@ def ingest_url(req: IngestURLReq):
         cur.close(); conn.close()
 
 # ===================== Chat (RAG wrapper) =====================
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    logger.info(f"Chat request received: {req.message}")
-    
+@app.post("/chat", response_model=EnhancedChatResponse)
+def enhanced_chat(req: ChatRequest):
     try:
-        # Check if database has documents first
+        # Check database
         conn = get_db_connection()
         cur = conn.cursor()
         try:
             cur.execute("SELECT COUNT(*) FROM document_chunks;")
             doc_count = cur.fetchone()[0]
-            
             if doc_count == 0:
-                return ChatResponse(
-                    response="Chào bạn! Hiện tại hệ thống chưa có dữ liệu về các nhà thầu. Bạn có thể upload tài liệu hoặc liên hệ admin để cập nhật thông tin nhé! 😊",
-                    sources=[]
+                return EnhancedChatResponse(
+                    response="Chào bạn! Hệ thống chưa có dữ liệu nhà thầu. Vui lòng thêm dữ liệu nhé!",
+                    contractors=[],
+                    has_recommendations=False
                 )
         finally:
             cur.close()
             conn.close()
         
-        # Search for similar documents with lower threshold
+        # Search for similar documents
         search_req = QueryRequest(query=req.message, k=req.top_k)
         search_result = search_similar(search_req)
         hits = search_result["results"]
-        
-        # Build context with more details
+
+        # Extract contractor information với UUID
+        contractors = extract_contractor_info(hits)
+
+        # Build context
         if hits:
             ctx_parts = []
             for i, h in enumerate(hits, 1):
-                content = h['content'].strip()
-                metadata = h.get('metadata', {})
-                source_info = f" (Nguồn: {metadata.get('source', 'database')})" if metadata.get('source') else ""
-                ctx_parts.append(f"[{i}] {content}{source_info}")
+                content = h['content'].strip()[:400]
+                ctx_parts.append(f"[{i}] {content}")
             context = "\n\n".join(ctx_parts)
         else:
-            context = "Không tìm thấy thông tin liên quan trong cơ sở dữ liệu."
+            context = "Không tìm thấy thông tin phù hợp."
 
-        # Enhanced friendly consultant prompt
+        # Enhanced prompt
         prompt = f"""
-Bạn là Minh - một tư vấn viên chuyên nghiệp và thân thiện về xây dựng tại Đà Nẵng. 
+Bạn là tư vấn viên nhà thầu thân thiện. 
 
-PHONG CÁCH TRAO ĐỔI:
-- Gọi khách hàng là "anh/chị" một cách lịch sự
-- Nhiệt tình, chu đáo như nhân viên tư vấn thực tế  
-- Khi thiếu thông tin: hỏi thêm chi tiết để tư vấn chính xác hơn
-- Luôn đưa ra gợi ý cụ thể và thiết thực
-- Kết thúc bằng câu hỏi mở để tiếp tục hỗ trợ
+CÁCH TRẢ LỜI:
+- Ngắn gọn 2-3 câu
+- Nếu tìm thấy nhà thầu phù hợp: giới thiệu ngắn gọn + "Xem chi tiết bên dưới"  
+- Không lặp lại thông tin chi tiết (sẽ hiển thị ở contractor cards)
+- Trích dẫn [1],[2] khi cần
 
-QUY TẮC TRẢ LỜI:
-- Dựa vào thông tin trong [NGỮ CẢNH] để tư vấn
-- Nếu thiếu thông tin: "Để tư vấn chính xác hơn, anh/chị có thể cho mình biết thêm..."
-- Luôn trích dẫn nguồn [1], [2] khi có thông tin cụ thể
-- Đề xuất 2-3 lựa chọn phù hợp nhất với yêu cầu
-
-[NGỮ CẢNH]
+[THÔNG TIN]
 {context}
 
-[CÂU HỎI KHÁCH HÀNG]
+[CÂU HỎI] 
 {req.message}
 
-Hãy trả lời như một tư vấn viên chuyên nghiệp:
+Trả lời ngắn gọn:
         """.strip()
 
         if not GEMINI_MODEL:
-            raise HTTPException(500, "Gemini API chưa cấu hình")
+            raise HTTPException(500, "Gemini chưa sẵn sàng")
         
         try:
             out = GEMINI_MODEL.generate_content(prompt)
-            answer = out.text
-            
-            # Add fallback if still generic response
-            if "chưa đủ dữ liệu" in answer.lower() and hits:
-                answer = f"""
-Chào anh/chị! Mình đã tìm thấy một số thông tin liên quan trong hệ thống. 
-
-{answer}
-
-Để mình có thể tư vấn chính xác hơn, anh/chị có thể chia sẻ thêm:
-- Loại công trình muốn xây (nhà phố, biệt thự, cao ốc...)
-- Khu vực cụ thể tại Đà Nẵng
-- Thời gian dự kiến khởi công
-
-Mình sẽ giúp anh/chị tìm nhà thầu phù hợp nhất! 😊
-                """.strip()
-                
+            answer = out.text or "Đang tìm nhà thầu phù hợp..."
         except Exception as e:
             logger.error(f"Gemini error: {e}")
-            answer = "Xin lỗi anh/chị, hệ thống đang gặp chút trục trặc. Anh/chị vui lòng thử lại sau một chút nhé! 🙏"
-            
-        return ChatResponse(
+            answer = "Có lỗi xảy ra khi tạo câu trả lời."
+        
+        return EnhancedChatResponse(
             response=answer,
-            sources=[
-                {
-                    "id": int(h["id"]), 
-                    "score": float(h["score"]), 
-                    "source": (h.get("metadata") or {}).get("source", "database")
-                }
-                for h in hits
-            ],
+            sources=[{"id": int(h["id"]), "score": float(h["score"])} for h in hits],
+            contractors=contractors,
+            has_recommendations=len(contractors) > 0
         )
         
     except Exception as e:
-        logger.error(f"Chat endpoint error: {e}")
-        return ChatResponse(
-            response="Xin lỗi anh/chị, mình đang gặp chút vấn đề kỹ thuật. Anh/chị thử lại sau nhé! 😊",
-            sources=[]
+        logger.error(f"Enhanced chat error: {e}")
+        return EnhancedChatResponse(
+            response="Có lỗi xảy ra, thử lại sau nhé!",
+            contractors=[],
+            has_recommendations=False
         )
-    
 
 
 @app.post("/debug/search-detailed")
