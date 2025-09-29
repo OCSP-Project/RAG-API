@@ -15,6 +15,9 @@ import time, io, requests as _rq
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 import logging
+import re
+from typing import Optional, Tuple, List
+from enum import Enum
 logger = logging.getLogger("rag-api")
 logger.setLevel(logging.INFO)
 
@@ -62,6 +65,32 @@ class DocItem(BaseModel):
 
 class AddDocsRequest(BaseModel):
     docs: List[DocItem]
+
+
+
+# ===================== Config & Constants =====================
+class ChatIntent(str, Enum):
+    GREETING = "greeting"
+    GENERAL = "general_chat"
+    CONTRACTOR_FULL = "contractor_request"
+    CONTRACTOR_PARTIAL = "incomplete_request"
+
+# Compile regex một lần duy nhất (performance boost)
+BUDGET_PATTERNS = [
+    re.compile(r'(\d+)\s*tỷ'),
+    re.compile(r'dưới\s*(\d+)\s*tỷ'),
+    re.compile(r'khoảng\s*(\d+)\s*tỷ'),
+    re.compile(r'(\d+)\s*-\s*(\d+)\s*tỷ')
+]
+
+GREETINGS = {'hello', 'hi', 'chào', 'xin chào', 'hey'}
+CONTRACTOR_KW = {'nhà thầu', 'thi công', 'xây dựng', 'công trình', 'tư vấn', 'báo giá', 'ngân sách'}
+PROJECT_TYPES = {
+    'nhà phố': ['nhà phố', 'townhouse'],
+    'biệt thự': ['biệt thự', 'villa'],
+    'chung cư': ['chung cú', 'apartment', 'căn hộ'],
+    'văn phòng': ['văn phòng', 'office']
+}
 
 class QueryRequest(BaseModel):
     query: str
@@ -166,6 +195,210 @@ def check_colab_health() -> str:
         return "connected" if r.status_code == 200 else "error"
     except Exception:
         return "disconnected"
+
+
+# ===================== Intent Detection Helper =====================
+def detect_intent_and_extract_info(message: str) -> Tuple[str, Optional[dict]]:
+    """
+    Phát hiện ý định và trích xuất thông tin từ tin nhắn
+    
+    Returns:
+        (intent, extracted_info)
+        - intent: 'greeting', 'contractor_request', 'general_chat'
+        - extracted_info: {'budget': str, 'project_type': str, 'location': str}
+    """
+    message_lower = message.lower()
+    
+    # 1. Phát hiện lời chào
+    greetings = ['hello', 'hi', 'chào', 'xin chào', 'hey', 'chào bạn']
+    if any(g in message_lower for g in greetings) and len(message_lower.split()) <= 3:
+        return ('greeting', None)
+    
+    # 2. Phát hiện yêu cầu tư vấn nhà thầu
+    contractor_keywords = [
+        'nhà thầu', 'thi công', 'xây dựng', 'công trình', 
+        'tư vấn', 'báo giá', 'ngân sách', 'gợi ý'
+    ]
+    
+    has_contractor_intent = any(kw in message_lower for kw in contractor_keywords)
+    
+    if not has_contractor_intent:
+        return ('general_chat', None)
+    
+    # 3. Trích xuất thông tin (ngân sách, loại công trình, địa điểm)
+    extracted = {}
+    
+    # Trích xuất ngân sách
+    budget_patterns = [
+        r'(\d+)\s*tỷ',  # "3 tỷ", "2tỷ"
+        r'dưới\s*(\d+)\s*tỷ',  # "dưới 2 tỷ"
+        r'khoảng\s*(\d+)\s*tỷ',  # "khoảng 3 tỷ"
+        r'(\d+)\s*-\s*(\d+)\s*tỷ',  # "2-3 tỷ"
+    ]
+    
+    for pattern in budget_patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            extracted['budget'] = match.group(0)
+            break
+    
+    # Trích xuất loại công trình
+    project_types = {
+        'nhà phố': ['nhà phố', 'townhouse'],
+        'biệt thự': ['biệt thự', 'villa'],
+        'chung cư': ['chung cư', 'apartment', 'căn hộ'],
+        'văn phòng': ['văn phòng', 'office'],
+        'nhà xưởng': ['nhà xưởng', 'factory', 'xưởng'],
+        'khách sạn': ['khách sạn', 'hotel'],
+        'nhà hàng': ['nhà hàng', 'restaurant'],
+    }
+    
+    for ptype, keywords in project_types.items():
+        if any(kw in message_lower for kw in keywords):
+            extracted['project_type'] = ptype
+            break
+    
+    # Trích xuất địa điểm
+    locations = ['đà nẵng', 'da nang', 'hà nội', 'hanoi', 'sài gòn', 'saigon', 'hồ chí minh']
+    for loc in locations:
+        if loc in message_lower:
+            extracted['location'] = loc
+            break
+    
+    # 4. Kiểm tra đủ thông tin
+    has_enough_info = 'budget' in extracted and 'project_type' in extracted
+    
+    if has_enough_info:
+        return ('contractor_request', extracted)
+    else:
+        return ('incomplete_request', extracted)
+
+# ===================== Intent Detection (Optimized) =====================
+def detect_intent(msg: str) -> Tuple[ChatIntent, dict]:
+    """Fast intent detection with minimal processing"""
+    msg_lower = msg.lower()
+    words = set(msg_lower.split())
+    
+    # Fast path: greeting (O(1) lookup)
+    if len(words) <= 3 and words & GREETINGS:
+        return (ChatIntent.GREETING, {})
+    
+    # Check contractor intent (O(1) lookup)
+    if not (words & CONTRACTOR_KW):
+        return (ChatIntent.GENERAL, {})
+    
+    # Extract info only if needed
+    info = {}
+    
+    # Budget extraction (stop at first match)
+    for pattern in BUDGET_PATTERNS:
+        match = pattern.search(msg_lower)
+        if match:
+            info['budget'] = match.group(0)
+            break
+    
+    # Project type (stop at first match)
+    for ptype, keywords in PROJECT_TYPES.items():
+        if any(kw in msg_lower for kw in keywords):
+            info['project_type'] = ptype
+            break
+    
+    # Location (simplified)
+    if 'đà nẵng' in msg_lower or 'da nang' in msg_lower:
+        info['location'] = 'đà nẵng'
+    
+    # Return intent based on completeness
+    has_budget = 'budget' in info
+    has_project = 'project_type' in info
+    
+    if has_budget and has_project:
+        return (ChatIntent.CONTRACTOR_FULL, info)
+    elif has_budget or has_project:
+        return (ChatIntent.CONTRACTOR_PARTIAL, info)
+    else:
+        return (ChatIntent.GENERAL, {})
+
+# ===================== Response Generators =====================
+def generate_greeting() -> str:
+    """Simple greeting response"""
+    return "Xin chào! Tôi có thể tư vấn nhà thầu xây dựng cho bạn. Bạn cần loại công trình nào và ngân sách bao nhiêu?"
+
+def generate_missing_info(info: dict) -> str:
+    """Ask for missing information"""
+    missing = []
+    if 'budget' not in info:
+        missing.append("ngân sách")
+    if 'project_type' not in info:
+        missing.append("loại công trình")
+    
+    return f"Để gợi ý chính xác, cho tôi biết thêm {' và '.join(missing)} nhé!\n\nVí dụ: 'Tìm nhà thầu xây nhà phố 3 tỷ'"
+
+def generate_no_contractors(info: dict) -> str:
+    """No contractors found"""
+    return f"""Chưa tìm thấy nhà thầu phù hợp với:
+• Loại: {info.get('project_type', '?')}
+• Ngân sách: {info.get('budget', '?')}
+
+Thử điều chỉnh điều kiện hoặc liên hệ hotline nhé!"""
+
+
+# ===================== Improved Contractor Extraction =====================
+def extract_contractor_info_improved(chunks: List[dict], limit: int = 5) -> List[ContractorAction]:
+    """Extract contractor information với limit có thể điều chỉnh"""
+    contractors = []
+    seen_ids = set()  # Tránh trùng lặp
+    
+    for chunk in chunks:
+        content = chunk.get('content', '')
+        
+        # Parse table format
+        if '|' in content and any(uuid in content for uuid in ['0fa72a73', '8c7628fd', 'fd268472']):
+            parts = [p.strip() for p in content.split('|') if p.strip()]
+            
+            if len(parts) >= 9:
+                try:
+                    contractor_id = parts[1]
+                    
+                    # Skip nếu đã có
+                    if contractor_id in seen_ids:
+                        continue
+                    seen_ids.add(contractor_id)
+                    
+                    name = parts[2]
+                    code = parts[3]
+                    description = parts[4]
+                    specialty = parts[5]
+                    budget = parts[6]
+                    location = parts[7]
+                    rating_str = parts[8]
+                    
+                    rating = float(rating_str) if rating_str.replace('.', '').replace(',', '').isdigit() else 4.0
+                    
+                    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+                    
+                    contractor = ContractorAction(
+                        contractor_id=contractor_id,
+                        contractor_name=name,
+                        contractor_slug=code,
+                        description=description,
+                        budget_range=budget,
+                        rating=rating,
+                        location=location,
+                        profile_url=f"{FRONTEND_URL}/contractors/{contractor_id}",
+                        contact_url=f"{FRONTEND_URL}/contractors/{contractor_id}?action=contact"
+                    )
+                    contractors.append(contractor)
+                    
+                    # Dừng khi đủ số lượng
+                    if len(contractors) >= limit:
+                        break
+                    
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Error parsing contractor: {e}")
+                    continue
+    
+    return contractors
+
 
 
 def extract_contractor_info(chunks: List[dict]) -> List[ContractorAction]:
@@ -573,61 +806,38 @@ def ingest_url(req: IngestURLReq):
 
 # ===================== Chat (RAG wrapper) =====================
 @app.post("/chat", response_model=EnhancedChatResponse)
-def enhanced_chat_with_contractors(req: ChatRequest):
+def chat_endpoint(req: ChatRequest):
+    """Optimized chat with intent routing"""
     try:
-        # Existing keyword search logic...
-        hits = simple_keyword_search(req.message, req.top_k)
+        # Step 1: Fast intent detection
+        intent, info = detect_intent(req.message)
         
-        # Extract contractors with URLs
-        contractors = extract_contractor_info(hits) if hits else []
+        # Step 2: Route based on intent (early returns)
+        if intent == ChatIntent.GREETING:
+            return EnhancedChatResponse(
+                response=generate_greeting(),
+                sources=[],
+                contractors=[],
+                has_recommendations=False
+            )
         
-        # Build response
-        if contractors:
-            ctx = "\n\n".join([f"[{i+1}] {h['content'][:300]}..." for i, h in enumerate(hits)])
-            
-            # Improved prompt to mention specific contractors
-            contractor_names = [c.contractor_name for c in contractors]
-            prompt = f"""
-Bạn là tư vấn viên nhà thầu thân thiện. 
-
-Với thông tin có sẵn, tôi GỢI Ý các nhà thầu sau: {', '.join(contractor_names)}
-
-[THÔNG TIN CHI TIẾT]
-{ctx}
-
-[YÊU CẦU KHÁCH HÀNG]
-{req.message}
-
-Hãy giới thiệu ngắn gọn (2-3 câu) về độ phù hợp và nói "Xem chi tiết bên dưới":
-            """.strip()
-        else:
-            ctx = "Không tìm thấy nhà thầu phù hợp."
-            prompt = f"""
-Tôi không tìm thấy nhà thầu phù hợp với yêu cầu: {req.message}
-
-Hãy hỏi thêm thông tin để tư vấn tốt hơn:
-            """.strip()
-
-        # Generate AI response
-        if GEMINI_MODEL:
-            try:
-                out = GEMINI_MODEL.generate_content(prompt)
-                answer = out.text or "Đang tìm nhà thầu phù hợp..."
-            except Exception as e:
-                logger.error(f"Gemini error: {e}")
-                answer = "Tìm thấy một số nhà thầu phù hợp. Xem chi tiết bên dưới."
-        else:
-            answer = "Hệ thống AI chưa sẵn sàng."
-            
-        return EnhancedChatResponse(
-            response=answer,
-            sources=[{"id": int(h["id"]), "score": float(h.get("score", 0))} for h in hits],
-            contractors=contractors,
-            has_recommendations=len(contractors) > 0
-        )
+        if intent == ChatIntent.CONTRACTOR_PARTIAL:
+            return EnhancedChatResponse(
+                response=generate_missing_info(info),
+                sources=[],
+                contractors=[],
+                has_recommendations=False
+            )
+        
+        # Step 3: Search only when needed
+        if intent == ChatIntent.CONTRACTOR_FULL:
+            return handle_contractor_request(req, info)
+        
+        # Step 4: General chat fallback
+        return handle_general_chat(req)
         
     except Exception as e:
-        logger.error(f"Enhanced chat error: {e}")
+        logger.error(f"Chat error: {e}")
         return EnhancedChatResponse(
             response="Có lỗi xảy ra, thử lại sau nhé!",
             contractors=[],
@@ -667,6 +877,120 @@ def debug_search_detailed(req: QueryRequest):
     finally:
         cur.close()
         conn.close()    
+
+
+# ===================== Handlers (Separated for clarity) =====================
+def handle_contractor_request(req: ChatRequest, info: dict) -> EnhancedChatResponse:
+    """Handle contractor search with full info"""
+    # Search with higher limit
+    hits = simple_keyword_search(req.message, req.top_k * 2)
+    contractors = extract_contractor_info_improved(hits, limit=min(req.top_k, 5))
+    
+    if not contractors:
+        return EnhancedChatResponse(
+            response=generate_no_contractors(info),
+            sources=[],
+            contractors=[],
+            has_recommendations=False
+        )
+    
+    # Generate AI response
+    ctx = "\n".join([f"[{i+1}] {h['content'][:200]}" for i, h in enumerate(hits[:3])])
+    prompt = f"""Giới thiệu ngắn gọn (2 câu) {len(contractors)} nhà thầu phù hợp với:
+• Loại: {info.get('project_type')}
+• Ngân sách: {info.get('budget')}
+
+Kết thúc: "Xem chi tiết bên dưới!"
+
+Danh sách: {', '.join(c.contractor_name for c in contractors)}
+Chi tiết: {ctx[:500]}"""
+    
+    # AI generation (with timeout protection)
+    answer = f"Gợi ý {len(contractors)} nhà thầu phù hợp. Xem chi tiết bên dưới!"
+    if GEMINI_MODEL:
+        try:
+            out = GEMINI_MODEL.generate_content(prompt)
+            answer = out.text or answer
+        except Exception as e:
+            logger.warning(f"Gemini fallback: {e}")
+    
+    return EnhancedChatResponse(
+        response=answer,
+        sources=[{"id": int(h["id"]), "score": float(h.get("score", 0))} for h in hits[:5]],
+        contractors=contractors,
+        has_recommendations=True
+    )
+
+def handle_general_chat(req: ChatRequest) -> EnhancedChatResponse:
+    """Handle general questions with RAG"""
+    hits = simple_keyword_search(req.message, 3)
+    
+    if not hits:
+        return EnhancedChatResponse(
+            response="Tôi chưa tìm thấy thông tin liên quan. Bạn có thể hỏi về nhà thầu xây dựng không?",
+            sources=[],
+            contractors=[],
+            has_recommendations=False
+        )
+    
+    ctx = "\n".join([h['content'][:150] for h in hits])
+    prompt = f"Trả lời ngắn:\n\nCâu hỏi: {req.message}\n\nThông tin: {ctx}"
+    
+    answer = "Tôi cần thêm thông tin để trả lời."
+    if GEMINI_MODEL:
+        try:
+            out = GEMINI_MODEL.generate_content(prompt)
+            answer = out.text or answer
+        except:
+            pass
+    
+    return EnhancedChatResponse(
+        response=answer,
+        sources=[{"id": int(h["id"]), "score": 0} for h in hits],
+        contractors=[],
+        has_recommendations=False
+    )
+
+# ===================== Optimized Contractor Extraction =====================
+def extract_contractor_info_improved(chunks: List[dict], limit: int = 5) -> List[ContractorAction]:
+    """Fast contractor extraction with early exit"""
+    contractors = []
+    seen = set()
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    
+    for chunk in chunks:
+        if len(contractors) >= limit:
+            break
+            
+        content = chunk.get('content', '')
+        if '|' not in content:
+            continue
+        
+        parts = [p.strip() for p in content.split('|') if p.strip()]
+        if len(parts) < 9:
+            continue
+        
+        contractor_id = parts[1]
+        if contractor_id in seen:
+            continue
+        seen.add(contractor_id)
+        
+        try:
+            contractors.append(ContractorAction(
+                contractor_id=contractor_id,
+                contractor_name=parts[2],
+                contractor_slug=parts[3],
+                description=parts[4],
+                budget_range=parts[6],
+                rating=float(parts[8]) if parts[8].replace('.','').isdigit() else 4.0,
+                location=parts[7],
+                profile_url=f"{frontend_url}/contractors/{contractor_id}",
+                contact_url=f"{frontend_url}/contractors/{contractor_id}?action=contact"
+            ))
+        except (IndexError, ValueError):
+            continue
+    
+    return contractors
 
 # ===================== SSE Streaming Chat =====================
 def _build_rag_prompt(question: str, hits: list) -> str:
