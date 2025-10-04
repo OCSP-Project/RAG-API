@@ -85,11 +85,18 @@ BUDGET_PATTERNS = [
 
 GREETINGS = {'hello', 'hi', 'chào', 'xin chào', 'hey'}
 CONTRACTOR_KW = {'nhà thầu', 'thi công', 'xây dựng', 'công trình', 'tư vấn', 'báo giá', 'ngân sách'}
+CONTRACTOR_PHRASES = [
+    r"nhà thầu", r"thi công", r"xây dựng", r"công trình",
+    r"tư vấn", r"báo giá", r"ngân sách", r"gợi ý"
+]
 PROJECT_TYPES = {
-    'nhà phố': ['nhà phố', 'townhouse'],
-    'biệt thự': ['biệt thự', 'villa'],
-    'chung cư': ['chung cú', 'apartment', 'căn hộ'],
-    'văn phòng': ['văn phòng', 'office']
+    'nhà phố':   [r"nhà phố", r"townhouse"],
+    'biệt thự':  [r"biệt thự", r"villa"],
+    'chung cư':  [r"chung cư", r"căn hộ", r"apartment"],
+    'văn phòng': [r"văn phòng", r"office"],
+    'nhà xưởng': [r"nhà xưởng", r"factory", r"xưởng"],
+    'khách sạn': [r"khách sạn", r"hotel"],
+    'nhà hàng':  [r"nhà hàng", r"restaurant"],
 }
 
 class QueryRequest(BaseModel):
@@ -275,45 +282,50 @@ def detect_intent_and_extract_info(message: str) -> Tuple[str, Optional[dict]]:
 
 # ===================== Intent Detection (Optimized) =====================
 def detect_intent(msg: str) -> Tuple[ChatIntent, dict]:
-    """Fast intent detection with minimal processing"""
-    msg_lower = msg.lower()
-    words = set(msg_lower.split())
-    
-    # Fast path: greeting (O(1) lookup)
-    if len(words) <= 3 and words & GREETINGS:
+    raw = msg or ""
+    msg_lower = raw.lower().strip()
+    msg_nod = _strip_accents(msg_lower)
+
+    # 1) Greeting
+    if len(msg_lower.split()) <= 4 and any(g in msg_lower for g in GREETINGS):
         return (ChatIntent.GREETING, {})
-    
-    # Check contractor intent (O(1) lookup)
-    if not (words & CONTRACTOR_KW):
+
+    # 2) Intent nhà thầu
+    has_contractor_intent = any(
+        _contains_phrase(msg_lower, p) or _contains_phrase(msg_nod, _strip_accents(p))
+        for p in CONTRACTOR_PHRASES
+    )
+    if not has_contractor_intent:
         return (ChatIntent.GENERAL, {})
-    
-    # Extract info only if needed
+
+    # 3) Trích xuất info
     info = {}
-    
-    # Budget extraction (stop at first match)
-    for pattern in BUDGET_PATTERNS:
-        match = pattern.search(msg_lower)
-        if match:
-            info['budget'] = match.group(0)
+
+    # Budget
+    for pat in BUDGET_PATTERNS:
+        m = pat.search(msg_lower)
+        if m:
+            info['budget'] = m.group(0)
             break
-    
-    # Project type (stop at first match)
-    for ptype, keywords in PROJECT_TYPES.items():
-        if any(kw in msg_lower for kw in keywords):
+
+    # Project type
+    for ptype, kws in PROJECT_TYPES.items():
+        if any(_contains_phrase(msg_lower, k) or _contains_phrase(msg_nod, _strip_accents(k))
+               for k in kws):
             info['project_type'] = ptype
             break
-    
-    # Location (simplified)
-    if 'đà nẵng' in msg_lower or 'da nang' in msg_lower:
-        info['location'] = 'đà nẵng'
-    
-    # Return intent based on completeness
-    has_budget = 'budget' in info
-    has_project = 'project_type' in info
-    
-    if has_budget and has_project:
+
+    # Location (phủ các biến thể có/không dấu)
+    for loc in [r"đà nẵng", r"da nang", r"hà nội", r"hanoi",
+                r"hồ chí minh", r"ho chi minh", r"sài gòn", r"saigon"]:
+        if _contains_phrase(msg_lower, loc) or _contains_phrase(msg_nod, _strip_accents(loc)):
+            info['location'] = loc
+            break
+
+    # 4) Quyết định intent
+    if 'budget' in info and 'project_type' in info:
         return (ChatIntent.CONTRACTOR_FULL, info)
-    elif has_budget or has_project:
+    elif 'budget' in info or 'project_type' in info:
         return (ChatIntent.CONTRACTOR_PARTIAL, info)
     else:
         return (ChatIntent.GENERAL, {})
@@ -343,7 +355,7 @@ Thử điều chỉnh điều kiện hoặc liên hệ hotline nhé!"""
 
 
 # ===================== Improved Contractor Extraction =====================
-def extract_contractor_info_improved(chunks: List[dict], limit: int = 5) -> List[ContractorAction]:
+
     """Extract contractor information với limit có thể điều chỉnh"""
     contractors = []
     seen_ids = set()  # Tránh trùng lặp
