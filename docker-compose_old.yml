@@ -25,12 +25,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      embedding:
+        condition: service_started
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - COLAB_EMBEDDING_URL=http://embedding:8001
       - EMBED_DIM=${EMBED_DIM:-768}
       - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
-      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
     ports:
       - "8000:8000"
     volumes:
@@ -40,6 +42,22 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
+      retries: 3
+
+  embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile.embedding
+    container_name: rag-embedding
+    environment:
+      - MODEL_ID=${MODEL_ID:-dangvantuan/vietnamese-document-embedding}
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 60s
+      timeout: 30s
       retries: 3
 
 volumes:

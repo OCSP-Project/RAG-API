@@ -28,6 +28,7 @@ services:
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - COLAB_EMBEDDING_URL=${COLAB_EMBEDDING_URL}
       - EMBED_DIM=${EMBED_DIM:-768}
       - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}

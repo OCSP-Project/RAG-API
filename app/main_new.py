@@ -6,7 +6,7 @@ from datetime import datetime
 
 from app.config.settings import settings
 from app.core.database import init_database, get_document_count
-from app.services.embedding_service import check_gemini_embedding_health
+from app.services.embedding_service import check_embedding_service_health
 from app.services.gemini_service import gemini_service
 from app.api import api_router
 
@@ -58,7 +58,7 @@ def health_check():
         "status": "healthy" if db_status == "connected" else "degraded",
         "database": db_status,
         "document_count": doc_count,
-        "embedding_service": check_gemini_embedding_health(),
+        "embedding_service": check_embedding_service_health(),
         "gemini_configured": gemini_service.is_configured(),
         "embed_dim": settings.EMBED_DIM,
         "timestamp": datetime.now().isoformat()
