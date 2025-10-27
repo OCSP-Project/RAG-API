@@ -13,14 +13,18 @@ def embed_via_gemini(texts: List[str]) -> List[List[float]]:
         import google.generativeai as genai
         genai.configure(api_key=settings.GEMINI_API_KEY)
         
-        # Use Gemini's embedding model
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Use Gemini's text embedding model
+        model = 'models/text-embedding-004'
         
         embeddings = []
         for text in texts:
             # Generate embedding for each text
-            response = model.embed_content(text)
-            embedding = response['embedding']
+            result = genai.embed_content(
+                model=model,
+                content=text,
+                task_type="retrieval_document"
+            )
+            embedding = result['embedding']
             embeddings.append(embedding)
         
         return embeddings
@@ -36,9 +40,12 @@ def check_gemini_embedding_health() -> str:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
         # Test with a simple embedding
-        model.embed_content("test")
+        genai.embed_content(
+            model='models/text-embedding-004',
+            content="test",
+            task_type="retrieval_document"
+        )
         return "connected"
     except Exception as e:
         logger.error(f"Gemini embedding health check failed: {e}")
