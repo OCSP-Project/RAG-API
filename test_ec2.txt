@@ -13,7 +13,7 @@ docker compose logs api | tail -50
 curl -X GET "http://localhost:8000/health" | jq '.'
 
 # 2. Test Chat - Greeting
-curl -X POST "http://localhost:8000/api/v1/chat" -H "Content-Type: application/json" -d '{"message": "Xin chào", "top_k": 5}'
+curl -X POST "http://localhost:8000/api/v1/chat" -H "Content-Type: application/json" -d '{"message": "liu liu", "top_k": 5}'
 
 # 3. Test Chat - Contractor Request
 curl -X POST "http://localhost:8000/api/v1/chat" -H "Content-Type: application/json" -d '{"message": "Tìm nhà thầu xây nhà phố 3 tỷ", "top_k": 5}' | jq '.'

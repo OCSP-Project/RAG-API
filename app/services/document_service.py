@@ -15,7 +15,7 @@ class DocumentProcessor:
     def __init__(self):
         self.converter = DocumentConverter()
     
-    def process_url(self, url: str, chunk_size: int = 1200, chunk_overlap: int = 150) -> Dict[str, Any]:
+    def process_url(self, url: str, chunk_size: int = 500, chunk_overlap: int = 50) -> Dict[str, Any]:
         """Process document from URL"""
         try:
             # Convert document
