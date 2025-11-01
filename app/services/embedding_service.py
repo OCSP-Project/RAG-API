@@ -19,36 +19,32 @@ def embed_via_gemini(texts: List[str]) -> List[List[float]]:
         embeddings = []
         for text in texts:
             try:
-                # Ensure genai.embed_content exists and is callable
-                if not hasattr(genai, 'embed_content'):
-                    raise AttributeError("genai.embed_content not available. Update google-generativeai: pip install --upgrade google-generativeai")
-                
-                # Call embed_content as a function
+                # Call embed_content as a function (NOT as method)
                 result = genai.embed_content(
                     model=model_name,
                     content=text,
                     task_type="retrieval_document"
                 )
                 
-                # Extract embedding from result - handle various formats
+                # Extract embedding - result is a dict with 'embedding' key
                 embedding = None
                 
                 if isinstance(result, dict):
-                    embedding = result.get('embedding') or result.get('embeddings', [None])[0]
+                    # Result is dict like: {'embedding': [0.1, 0.2, ...]}
+                    embedding = result.get('embedding')
                 elif hasattr(result, 'embedding'):
                     embedding = result.embedding
-                elif hasattr(result, 'embeddings'):
-                    # If result has embeddings (plural), take first
-                    embeds = result.embeddings
-                    embedding = embeds[0] if isinstance(embeds, (list, tuple)) and len(embeds) > 0 else embeds
-                else:
-                    # Try to get embedding attribute or use result directly
-                    embedding = getattr(result, 'embedding', None) or result
+                elif hasattr(result, '__getitem__'):
+                    # Try to access as dict-like
+                    try:
+                        embedding = result['embedding']
+                    except (KeyError, TypeError):
+                        pass
+                
+                if embedding is None:
+                    raise ValueError(f"No embedding found in result: {result}")
                 
                 # Ensure embedding is a list
-                if embedding is None:
-                    raise ValueError("Embedding result is None")
-                    
                 if not isinstance(embedding, list):
                     if hasattr(embedding, '__iter__') and not isinstance(embedding, str):
                         embedding = list(embedding)
@@ -57,17 +53,9 @@ def embed_via_gemini(texts: List[str]) -> List[List[float]]:
                 
                 embeddings.append(embedding)
                 
-            except (AttributeError, TypeError) as e:
-                error_msg = str(e)
-                logger.error(f"Embedding API error: {error_msg}")
-                
-                # More specific error message
-                if "'GenerativeModel'" in error_msg or "embed_content" in error_msg.lower():
-                    raise Exception(
-                        f"Gemini embedding API error: {error_msg}. "
-                        "Please update google-generativeai: pip install --upgrade google-generativeai"
-                    )
-                raise Exception(f"Gemini embedding failed: {error_msg}")
+            except Exception as e:
+                logger.error(f"Embedding error for text: {e}")
+                raise Exception(f"Gemini embedding failed: {e}")
         
         return embeddings
         
@@ -79,33 +67,39 @@ def check_gemini_embedding_health() -> str:
     """Check if Gemini embedding is available"""
     if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY == "your-gemini-key-here":
         return "not_configured"
+    
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.GEMINI_API_KEY)
         
-        # Check if embed_content function exists
-        if not hasattr(genai, 'embed_content'):
-            logger.warning("genai.embed_content not available")
-            return "disconnected"
-        
-        # Test with a simple embedding
+        # Test with a simple embedding - CALL AS FUNCTION, not method
         try:
             result = genai.embed_content(
                 model='models/text-embedding-004',
                 content="test",
                 task_type="retrieval_document"
             )
-            # Just check if result is not None, don't parse it
+            
+            # Result is a dict with 'embedding' key
             if result is not None:
-                return "connected"
-            else:
-                return "disconnected"
-        except (AttributeError, TypeError) as e:
-            error_msg = str(e)
-            if "'GenerativeModel'" in error_msg:
-                logger.warning(f"Gemini embedding API version issue: {error_msg}")
-                return "disconnected"
-            raise
+                if isinstance(result, dict) and 'embedding' in result:
+                    return "connected"
+                elif hasattr(result, 'embedding'):
+                    return "connected"
+                elif hasattr(result, '__getitem__'):
+                    try:
+                        if result['embedding']:
+                            return "connected"
+                    except (KeyError, TypeError):
+                        pass
+            
+            logger.warning(f"Unexpected result format: {type(result)}")
+            return "disconnected"
+            
+        except Exception as e:
+            logger.error(f"Gemini embedding health check error: {e}")
+            return "disconnected"
+            
     except Exception as e:
         logger.error(f"Gemini embedding health check failed: {e}")
         return "disconnected"
