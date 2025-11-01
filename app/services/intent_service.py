@@ -112,18 +112,29 @@ def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[Contract
         seen.add(contractor_id)
         
         try:
+            # Extract specialties from field (parts[5]) if available
+            specialties = []
+            if len(parts) > 5 and parts[5]:
+                # If field contains multiple specialties separated by comma
+                specialties = [s.strip() for s in parts[5].split(',') if s.strip()]
+                # If single value, add it as specialty
+                if not specialties and parts[5].strip():
+                    specialties = [parts[5].strip()]
+            
             contractors.append(ContractorAction(
                 contractor_id=contractor_id,
                 contractor_name=parts[2],
                 contractor_slug=parts[3],
                 description=parts[4],
                 budget_range=parts[6],
-                rating=float(parts[8]) if parts[8].replace('.','').isdigit() else 4.0,
+                rating=float(parts[8]) if parts[8].replace('.','').replace('-','').isdigit() else 4.0,
+                specialties=specialties,
                 location=parts[7],
                 profile_url=f"{settings.FRONTEND_URL}/contractors/{contractor_id}",
                 contact_url=f"{settings.FRONTEND_URL}/contractors/{contractor_id}?action=contact"
             ))
-        except (IndexError, ValueError):
+        except (IndexError, ValueError) as e:
+            logger.warning(f"Error parsing contractor: {e}")
             continue
     
     return contractors

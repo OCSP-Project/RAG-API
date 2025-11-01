@@ -82,13 +82,30 @@ def check_gemini_embedding_health() -> str:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.GEMINI_API_KEY)
+        
+        # Check if embed_content function exists
+        if not hasattr(genai, 'embed_content'):
+            logger.warning("genai.embed_content not available")
+            return "disconnected"
+        
         # Test with a simple embedding
-        genai.embed_content(
-            model='models/text-embedding-004',
-            content="test",
-            task_type="retrieval_document"
-        )
-        return "connected"
+        try:
+            result = genai.embed_content(
+                model='models/text-embedding-004',
+                content="test",
+                task_type="retrieval_document"
+            )
+            # Just check if result is not None, don't parse it
+            if result is not None:
+                return "connected"
+            else:
+                return "disconnected"
+        except (AttributeError, TypeError) as e:
+            error_msg = str(e)
+            if "'GenerativeModel'" in error_msg:
+                logger.warning(f"Gemini embedding API version issue: {error_msg}")
+                return "disconnected"
+            raise
     except Exception as e:
         logger.error(f"Gemini embedding health check failed: {e}")
         return "disconnected"

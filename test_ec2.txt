@@ -1,0 +1,32 @@
+# Các lệnh test trên EC2
+
+# 0. Kiểm tra container đang chạy
+docker compose ps
+
+# 0.1. Nếu container không chạy, khởi động lại
+docker compose up -d
+
+# 0.2. Xem logs nếu có lỗi
+docker compose logs api | tail -50
+
+# 1. Health Check
+curl -X GET "http://localhost:8000/health" | jq '.'
+
+# 2. Test Chat - Greeting
+curl -X POST "http://localhost:8000/api/v1/chat" -H "Content-Type: application/json" -d '{"message": "Xin chào", "top_k": 5}'
+
+# 3. Test Chat - Contractor Request
+curl -X POST "http://localhost:8000/api/v1/chat" -H "Content-Type: application/json" -d '{"message": "Tìm nhà thầu xây nhà phố 3 tỷ", "top_k": 5}' | jq '.'
+
+# 4. Test Search Similar
+curl -X POST "http://localhost:8000/api/v1/search-similar" -H "Content-Type: application/json" -d '{"query": "Tìm nhà thầu xây dựng", "k": 5}' | jq '.'
+
+# 5. Embedding Google Docs (export URL)
+curl -X POST "http://localhost:8000/api/v1/ingest/url" -H "Content-Type: application/json" -d '{"url": "https://docs.google.com/document/d/1pJkvWbM_TTME_hplNJJ0HkH8FVna7lPF/export?format=docx", "chunk_size": 500, "chunk_overlap": 50}' | jq '.'
+
+# 6. Embedding file docx local
+curl -X POST "http://localhost:8000/api/v1/upload_document" -H "Content-Type: application/json" -d '{"source": "/home/ubuntu/contractors.docx", "chunk_size": 500, "chunk_overlap": 50}' | jq '.'
+
+# 7. Kiểm tra số lượng documents
+curl -X GET "http://localhost:8000/health" | jq '.document_count'
+

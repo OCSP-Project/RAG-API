@@ -33,6 +33,15 @@ app.add_middleware(
 # Include API routes
 app.include_router(api_router)
 
+# Add direct /chat endpoint for frontend compatibility
+from app.services.chat_service import chat_service
+from app.models.schemas import ChatRequest, EnhancedChatResponse
+
+@app.post("/chat", response_model=EnhancedChatResponse)
+def chat_direct(req: ChatRequest):
+    """Direct chat endpoint for frontend"""
+    return chat_service.process_chat(req)
+
 # Startup event
 @app.on_event("startup")
 def on_startup():

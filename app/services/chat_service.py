@@ -25,6 +25,7 @@ class ChatService:
             
             # Route based on intent
             if intent == ChatIntent.GREETING:
+                from app.models.schemas import SourceItem
                 return EnhancedChatResponse(
                     response=generate_greeting(),
                     sources=[],
@@ -33,6 +34,7 @@ class ChatService:
                 )
             
             if intent == ChatIntent.CONTRACTOR_PARTIAL:
+                from app.models.schemas import SourceItem
                 return EnhancedChatResponse(
                     response=generate_missing_info(info),
                     sources=[],
@@ -50,6 +52,7 @@ class ChatService:
             logger.error(f"Chat processing error: {e}")
             return EnhancedChatResponse(
                 response="Có lỗi xảy ra, thử lại sau nhé!",
+                sources=[],
                 contractors=[],
                 has_recommendations=False
             )
@@ -64,6 +67,7 @@ class ChatService:
         contractors = extract_contractor_info(hits, limit=min(request.top_k, 5))
         
         if not contractors:
+            from app.models.schemas import SourceItem
             return EnhancedChatResponse(
                 response=generate_no_contractors(info),
                 sources=[],
@@ -89,9 +93,10 @@ Chi tiết: {ctx[:500]}"""
             if ai_response:
                 answer = ai_response
         
+        from app.models.schemas import SourceItem
         return EnhancedChatResponse(
             response=answer,
-            sources=[{"id": int(h["id"]), "score": float(h.get("score", 0))} for h in hits[:5]],
+            sources=[SourceItem(id=int(h["id"]), score=float(h.get("score", 0))) for h in hits[:5]],
             contractors=contractors,
             has_recommendations=True
         )
@@ -120,9 +125,10 @@ Chi tiết: {ctx[:500]}"""
             if ai_response:
                 answer = ai_response
         
+        from app.models.schemas import SourceItem
         return EnhancedChatResponse(
             response=answer,
-            sources=[{"id": int(h["id"]), "score": 0} for h in hits],
+            sources=[SourceItem(id=int(h["id"]), score=float(h.get("score", 0))) for h in hits],
             contractors=[],
             has_recommendations=False
         )

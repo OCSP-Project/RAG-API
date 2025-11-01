@@ -35,6 +35,7 @@ class ContractorAction(BaseModel):
     description: str
     budget_range: str
     rating: float
+    specialties: Optional[List[str]] = Field(default_factory=list)
     location: str
     profile_url: str
     contact_url: str
@@ -48,9 +49,14 @@ class ChatResponse(BaseModel):
     response: str
     sources: List[Dict[str, Any]] = Field(default_factory=list)
 
+class SourceItem(BaseModel):
+    id: int
+    score: float
+    source: Optional[str] = None
+
 class EnhancedChatResponse(BaseModel):
     response: str
-    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    sources: List[SourceItem] = Field(default_factory=list)
     contractors: List[ContractorAction] = Field(default_factory=list)
     has_recommendations: bool = False
 
