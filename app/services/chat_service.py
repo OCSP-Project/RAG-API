@@ -130,7 +130,7 @@ Chi tiết: {ctx[:500]}"""
     def search_similar(self, query: str, k: int = 5) -> Dict[str, Any]:
         """Search for similar documents"""
         try:
-            query_vector = embed_via_api([query])[0]
+            query_vector = embed_via_gemini([query])[0]
             hits = search_similar_vectors(query_vector, k)
             
             return {

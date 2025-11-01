@@ -24,7 +24,22 @@ def embed_via_gemini(texts: List[str]) -> List[List[float]]:
                 content=text,
                 task_type="retrieval_document"
             )
-            embedding = result['embedding']
+            
+            # Handle different response formats
+            if isinstance(result, dict):
+                embedding = result.get('embedding', result)
+            elif hasattr(result, 'embedding'):
+                embedding = result.embedding
+            elif hasattr(result, '__getitem__'):
+                embedding = result['embedding'] if 'embedding' in result else result
+            else:
+                # If result is directly the embedding
+                embedding = result
+            
+            # Ensure embedding is a list
+            if not isinstance(embedding, list):
+                embedding = list(embedding) if hasattr(embedding, '__iter__') else [embedding]
+            
             embeddings.append(embedding)
         
         return embeddings
