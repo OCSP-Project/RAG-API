@@ -14,33 +14,60 @@ def embed_via_gemini(texts: List[str]) -> List[List[float]]:
         genai.configure(api_key=settings.GEMINI_API_KEY)
         
         # Use Gemini's text embedding model
-        model = 'models/text-embedding-004'
+        model_name = 'models/text-embedding-004'
         
         embeddings = []
         for text in texts:
-            # Generate embedding for each text
-            result = genai.embed_content(
-                model=model,
-                content=text,
-                task_type="retrieval_document"
-            )
-            
-            # Handle different response formats
-            if isinstance(result, dict):
-                embedding = result.get('embedding', result)
-            elif hasattr(result, 'embedding'):
-                embedding = result.embedding
-            elif hasattr(result, '__getitem__'):
-                embedding = result['embedding'] if 'embedding' in result else result
-            else:
-                # If result is directly the embedding
-                embedding = result
-            
-            # Ensure embedding is a list
-            if not isinstance(embedding, list):
-                embedding = list(embedding) if hasattr(embedding, '__iter__') else [embedding]
-            
-            embeddings.append(embedding)
+            try:
+                # Ensure genai.embed_content exists and is callable
+                if not hasattr(genai, 'embed_content'):
+                    raise AttributeError("genai.embed_content not available. Update google-generativeai: pip install --upgrade google-generativeai")
+                
+                # Call embed_content as a function
+                result = genai.embed_content(
+                    model=model_name,
+                    content=text,
+                    task_type="retrieval_document"
+                )
+                
+                # Extract embedding from result - handle various formats
+                embedding = None
+                
+                if isinstance(result, dict):
+                    embedding = result.get('embedding') or result.get('embeddings', [None])[0]
+                elif hasattr(result, 'embedding'):
+                    embedding = result.embedding
+                elif hasattr(result, 'embeddings'):
+                    # If result has embeddings (plural), take first
+                    embeds = result.embeddings
+                    embedding = embeds[0] if isinstance(embeds, (list, tuple)) and len(embeds) > 0 else embeds
+                else:
+                    # Try to get embedding attribute or use result directly
+                    embedding = getattr(result, 'embedding', None) or result
+                
+                # Ensure embedding is a list
+                if embedding is None:
+                    raise ValueError("Embedding result is None")
+                    
+                if not isinstance(embedding, list):
+                    if hasattr(embedding, '__iter__') and not isinstance(embedding, str):
+                        embedding = list(embedding)
+                    else:
+                        raise ValueError(f"Invalid embedding format: {type(embedding)}")
+                
+                embeddings.append(embedding)
+                
+            except (AttributeError, TypeError) as e:
+                error_msg = str(e)
+                logger.error(f"Embedding API error: {error_msg}")
+                
+                # More specific error message
+                if "'GenerativeModel'" in error_msg or "embed_content" in error_msg.lower():
+                    raise Exception(
+                        f"Gemini embedding API error: {error_msg}. "
+                        "Please update google-generativeai: pip install --upgrade google-generativeai"
+                    )
+                raise Exception(f"Gemini embedding failed: {error_msg}")
         
         return embeddings
         
