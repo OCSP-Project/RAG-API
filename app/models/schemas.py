@@ -65,3 +65,13 @@ class ChatIntent(str, Enum):
     GENERAL = "general_chat"
     CONTRACTOR_FULL = "contractor_request"
     CONTRACTOR_PARTIAL = "incomplete_request"
+
+# Construction Incident Analysis
+class ImageAnalysisRequest(BaseModel):
+    images: List[str]  # Base64 strings
+    incident_report: str = ""  # Báo cáo sự cố text
+    context: str = ""  # Ngữ cảnh bổ sung
+
+class ImageAnalysisResponse(BaseModel):
+    incident_report: str  # Báo cáo sự cố được AI phân tích
+    recommendations: str  # Đề xuất giải pháp

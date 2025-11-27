@@ -17,3 +17,6 @@ google-generativeai>=0.8.0
 
 # Utilities
 python-multipart>=0.0.6
+
+# Image processing
+Pillow>=10.0,<11

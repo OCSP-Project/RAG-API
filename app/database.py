@@ -7,7 +7,7 @@ load_dotenv()
 
 def get_db_connection():
     database_url = os.getenv("DATABASE_URL")
-    conn = psycopg2.connect(database_url)
+    conn = psycopg2.pool.SimpleConnectionPool(1, 10, database_url)
     return conn
 
 def init_db():

@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import (
-    AddDocsRequest, QueryRequest, StoreChunkRequest, 
-    IngestURLReq, DocumentUploadRequest, ChatRequest
+    AddDocsRequest, QueryRequest, StoreChunkRequest,
+    IngestURLReq, DocumentUploadRequest, ChatRequest,
+    ImageAnalysisRequest, ImageAnalysisResponse
 )
 from app.services.embedding_service import embed_via_gemini, check_gemini_embedding_health
 from app.services.document_service import document_processor
 from app.services.chat_service import chat_service
+from app.services.gemini_service import gemini_service
 from app.core.database import store_chunks, search_similar_vectors, get_document_count
 from app.config.settings import settings
 import json
@@ -82,3 +84,32 @@ def ingest_url(req: IngestURLReq):
 def chat_endpoint(req: ChatRequest):
     """Chat endpoint with intent detection and routing"""
     return chat_service.process_chat(req)
+
+@router.post("/analyze-incident", response_model=ImageAnalysisResponse)
+async def analyze_incident(request: ImageAnalysisRequest):
+    """
+    Phân tích ảnh sự cố xây dựng bằng AI
+
+    - Nhận ảnh base64 + báo cáo sơ bộ
+    - Trả về báo cáo chi tiết + đề xuất giải pháp
+    """
+    if not request.images:
+        raise HTTPException(status_code=400, detail="Vui lòng cung cấp ít nhất 1 ảnh sự cố.")
+
+    if not gemini_service.is_configured():
+        raise HTTPException(
+            status_code=500,
+            detail="Hệ thống AI chưa được cấu hình. Vui lòng liên hệ quản trị viên."
+        )
+
+    # Gọi service phân tích
+    result = await gemini_service.analyze_incident_images(
+        images_b64=request.images,
+        incident_report=request.incident_report,
+        context=request.context
+    )
+
+    return ImageAnalysisResponse(
+        incident_report=result.get("incident_report", ""),
+        recommendations=result.get("recommendations", "")
+    )
