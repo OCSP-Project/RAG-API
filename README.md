@@ -71,3 +71,19 @@ RAG-API/
 ---
 
 ### 3. `app/core/database.py`
+
+# 1. Tạo file swap 4GB (đủ để gánh thư viện AI)
+
+sudo fallocate -l 4G /swapfile
+
+# 2. Phân quyền
+
+sudo chmod 600 /swapfile
+
+# 3. Tạo vùng swap
+
+sudo mkswap /swapfile
+
+# 4. Kích hoạt
+
+sudo swapon /swapfile
