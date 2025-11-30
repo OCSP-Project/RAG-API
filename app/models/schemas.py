@@ -75,3 +75,12 @@ class ImageAnalysisRequest(BaseModel):
 class ImageAnalysisResponse(BaseModel):
     incident_report: str  # Báo cáo sự cố được AI phân tích
     recommendations: str  # Đề xuất giải pháp
+
+# AI Consultation
+class AIConsultationRequest(BaseModel):
+    user_id: str  # User ID để track rate limit
+    message: str  # Câu hỏi của user
+
+class AIConsultationResponse(BaseModel):
+    response: str  # Câu trả lời từ AI
+    remaining_messages: int  # Số tin nhắn còn lại trong ngày

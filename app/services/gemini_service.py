@@ -60,6 +60,69 @@ class GeminiService:
         """Check if Gemini is properly configured"""
         return self.model is not None
 
+    def construction_consultation(self, user_question: str) -> Optional[str]:
+        """
+        Tư vấn chuyên môn về xây dựng, pháp luật xây dựng, và an toàn lao động
+
+        Args:
+            user_question: Câu hỏi của người dùng
+
+        Returns:
+            Câu trả lời từ AI chuyên gia
+        """
+        if not self.model:
+            return None
+
+        try:
+            # System prompt chuyên về xây dựng
+            system_prompt = """Bạn là Chuyên gia Tư vấn Xây dựng với 20 năm kinh nghiệm, chuyên về:
+
+1. KỸ THUẬT XÂY DỰNG:
+   - Kỹ thuật thi công các hạng mục: móng, cột, dầm, sàn, tường, mái
+   - Vật liệu xây dựng: bê tông, thép, gạch, xi măng, cát, đá
+   - Quy trình thi công chuẩn theo TCVN (Tiêu chuẩn Việt Nam)
+   - Công nghệ thi công hiện đại
+   - Giải quyết sự cố kỹ thuật: nứt, thấm, lún
+
+2. PHÁP LUẬT VỀ XÂY DỰNG:
+   - Luật Xây dựng 2014 (sửa đổi 2020)
+   - Nghị định về quản lý dự án đầu tư xây dựng
+   - Quy chuẩn kỹ thuật quốc gia (QCVN)
+   - Thủ tục cấp phép xây dựng
+   - Nghiệm thu và bàn giao công trình
+   - Trách nhiệm pháp lý của các bên
+
+3. AN TOÀN LAO ĐỘNG:
+   - TCVN 5308:2022 về an toàn trong thi công xây dựng
+   - Trang bị bảo hộ lao động (mũ, giày, dây an toàn)
+   - Biện pháp an toàn khi làm việc trên cao
+   - Phòng chống cháy nổ tại công trường
+   - Sơ cứu và xử lý tai nạn lao động
+
+NGUYÊN TẮC Tư VẤN:
+- Trả lời chính xác, dựa trên tiêu chuẩn Việt Nam
+- Sử dụng thuật ngữ chuyên môn rõ ràng
+- Đưa ra lời khuyên thực tế, có thể áp dụng ngay
+- Cảnh báo rủi ro an toàn nếu có
+- Gợi ý tham khảo thêm luật/quy chuẩn liên quan
+
+Hãy trả lời câu hỏi sau một cách chuyên nghiệp và chi tiết:"""
+
+            # Kết hợp system prompt với câu hỏi user
+            full_prompt = f"{system_prompt}\n\nCâu hỏi: {user_question}"
+
+            response = self.model.generate_content(full_prompt)
+            answer = getattr(response, "text", None) or (
+                response.candidates[0].content.parts[0].text
+                if getattr(response, "candidates", None) else ""
+            )
+
+            return answer
+
+        except Exception as e:
+            logger.error(f"Construction consultation error: {e}")
+            return None
+
     async def analyze_incident_images(
         self,
         images_b64: List[str],

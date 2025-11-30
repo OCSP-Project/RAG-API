@@ -2,7 +2,8 @@ from fastapi import APIRouter, HTTPException
 from app.models.schemas import (
     AddDocsRequest, QueryRequest, StoreChunkRequest,
     IngestURLReq, DocumentUploadRequest, ChatRequest,
-    ImageAnalysisRequest, ImageAnalysisResponse
+    ImageAnalysisRequest, ImageAnalysisResponse,
+    AIConsultationRequest, AIConsultationResponse
 )
 from app.services.embedding_service import embed_via_gemini, check_gemini_embedding_health
 from app.services.document_service import document_processor
@@ -11,8 +12,48 @@ from app.services.gemini_service import gemini_service
 from app.core.database import store_chunks, search_similar_vectors, get_document_count
 from app.config.settings import settings
 import json
+from datetime import datetime, timedelta
+from collections import defaultdict
+from typing import Dict, List
 
 router = APIRouter()
+
+# In-memory rate limiter for AI consultation (5 messages per day per user)
+class RateLimiter:
+    def __init__(self, max_messages_per_day: int = 5):
+        self.max_messages = max_messages_per_day
+        # user_id -> list of timestamps
+        self.user_messages: Dict[str, List[datetime]] = defaultdict(list)
+
+    def check_and_increment(self, user_id: str) -> tuple[bool, int]:
+        """
+        Check if user can send message and increment counter
+
+        Returns:
+            (can_send, remaining_messages)
+        """
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Lọc bỏ các message cũ (không phải hôm nay)
+        self.user_messages[user_id] = [
+            ts for ts in self.user_messages[user_id]
+            if ts >= today_start
+        ]
+
+        current_count = len(self.user_messages[user_id])
+
+        if current_count >= self.max_messages:
+            return False, 0
+
+        # Thêm message mới
+        self.user_messages[user_id].append(now)
+        remaining = self.max_messages - (current_count + 1)
+
+        return True, remaining
+
+# Global rate limiter instance
+ai_rate_limiter = RateLimiter(max_messages_per_day=5)
 
 @router.post("/add_docs")
 def add_docs(req: AddDocsRequest):
@@ -112,4 +153,46 @@ async def analyze_incident(request: ImageAnalysisRequest):
     return ImageAnalysisResponse(
         incident_report=result.get("incident_report", ""),
         recommendations=result.get("recommendations", "")
+    )
+
+@router.post("/ai-consultation", response_model=AIConsultationResponse)
+async def ai_consultation(request: AIConsultationRequest):
+    """
+    Tư vấn AI chuyên về kỹ thuật xây dựng, pháp luật xây dựng, và an toàn lao động
+
+    Rate limit: 5 tin nhắn mỗi ngày cho mỗi user
+    """
+    if not request.user_id or not request.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng cung cấp user_id và nội dung câu hỏi."
+        )
+
+    if not gemini_service.is_configured():
+        raise HTTPException(
+            status_code=500,
+            detail="Hệ thống AI chưa được cấu hình. Vui lòng liên hệ quản trị viên."
+        )
+
+    # Kiểm tra rate limit
+    can_send, remaining = ai_rate_limiter.check_and_increment(request.user_id)
+
+    if not can_send:
+        raise HTTPException(
+            status_code=429,
+            detail="Bạn đã hết lượt tư vấn hôm nay. Vui lòng quay lại vào ngày mai. (Giới hạn: 5 tin nhắn/ngày)"
+        )
+
+    # Gọi AI để tư vấn
+    response_text = gemini_service.construction_consultation(request.message)
+
+    if not response_text:
+        raise HTTPException(
+            status_code=500,
+            detail="Hệ thống AI gặp lỗi khi xử lý câu hỏi. Vui lòng thử lại."
+        )
+
+    return AIConsultationResponse(
+        response=response_text,
+        remaining_messages=remaining
     )
