@@ -9,12 +9,14 @@ from app.services.embedding_service import embed_via_gemini, check_gemini_embedd
 from app.services.document_service import document_processor
 from app.services.chat_service import chat_service
 from app.services.gemini_service import gemini_service
+from app.services.contractor_service import contractor_embedding_service
 from app.core.database import store_chunks, search_similar_vectors, get_document_count
 from app.config.settings import settings
 import json
 from datetime import datetime, timedelta
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Any
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -196,3 +198,64 @@ async def ai_consultation(request: AIConsultationRequest):
         response=response_text,
         remaining_messages=remaining
     )
+
+# Pydantic models for contractor embedding
+class ContractorData(BaseModel):
+    contractor_id: str
+    contractor_name: str
+    contractor_slug: str
+    description: str
+    specialties: List[str] = []
+    budget_range: str
+    location: str
+    rating: float
+    years_of_experience: int = 0
+    team_size: int = 0
+    is_verified: bool = False
+
+class EmbedContractorsRequest(BaseModel):
+    contractors: List[Dict[str, Any]]
+    chunk_size: int = 500
+    chunk_overlap: int = 50
+
+class EmbedContractorsResponse(BaseModel):
+    message: str
+    contractors_processed: int
+    chunks_created: int
+    chunks_stored: int
+    chunk_ids: List[int]
+
+@router.post("/embed/contractors", response_model=EmbedContractorsResponse)
+async def embed_contractors(request: EmbedContractorsRequest):
+    """
+    Embed contractors from backend into RAG database
+
+    Accepts a list of contractor objects and creates searchable embeddings.
+    This allows AI to recommend contractors based on user queries.
+    """
+    if not request.contractors:
+        raise HTTPException(
+            status_code=400,
+            detail="Vui lòng cung cấp danh sách contractors."
+        )
+
+    try:
+        result = contractor_embedding_service.embed_contractors(
+            contractors=request.contractors,
+            chunk_size=request.chunk_size,
+            chunk_overlap=request.chunk_overlap
+        )
+
+        return EmbedContractorsResponse(
+            message=result["message"],
+            contractors_processed=result["contractors_processed"],
+            chunks_created=result["chunks_created"],
+            chunks_stored=result["chunks_stored"],
+            chunk_ids=result["chunk_ids"]
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Có lỗi xảy ra khi embedding contractors: {str(e)}"
+        )
