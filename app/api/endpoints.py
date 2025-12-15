@@ -10,7 +10,7 @@ from app.services.document_service import document_processor
 from app.services.chat_service import chat_service
 from app.services.gemini_service import gemini_service
 from app.services.contractor_service import contractor_embedding_service
-from app.core.database import store_chunks, search_similar_vectors, get_document_count
+from app.core.database import store_chunks, search_similar_vectors, get_document_count, delete_all_chunks, delete_chunks_by_type
 from app.config.settings import settings
 import json
 from datetime import datetime, timedelta
@@ -258,4 +258,44 @@ async def embed_contractors(request: EmbedContractorsRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Có lỗi xảy ra khi embedding contractors: {str(e)}"
+        )
+
+@router.delete("/chunks")
+def delete_all_chunks_endpoint():
+    """
+    Delete all chunks from the database
+
+    WARNING: This will permanently delete all embedded data.
+    """
+    try:
+        deleted_count = delete_all_chunks()
+        return {
+            "message": "All chunks deleted successfully",
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete chunks: {str(e)}"
+        )
+
+@router.delete("/chunks/type/{chunk_type}")
+def delete_chunks_by_type_endpoint(chunk_type: str):
+    """
+    Delete chunks by metadata type
+
+    Common types:
+    - contractor: Delete all contractor embeddings
+    - document: Delete all document embeddings
+    """
+    try:
+        deleted_count = delete_chunks_by_type(chunk_type)
+        return {
+            "message": f"Chunks with type '{chunk_type}' deleted successfully",
+            "deleted_count": deleted_count
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete chunks: {str(e)}"
         )

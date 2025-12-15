@@ -112,3 +112,40 @@ def get_document_count() -> int:
     finally:
         cur.close()
         conn.close()
+
+def delete_all_chunks() -> int:
+    """Delete all chunks from database"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM document_chunks;")
+        deleted_count = cur.rowcount
+        conn.commit()
+        logger.info(f"Deleted {deleted_count} chunks from database")
+        return deleted_count
+    except Exception as e:
+        conn.rollback()
+        raise Exception(f"Failed to delete chunks: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
+def delete_chunks_by_type(chunk_type: str) -> int:
+    """Delete chunks by metadata type (e.g., 'contractor', 'document')"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM document_chunks
+            WHERE metadata->>'type' = %s;
+        """, (chunk_type,))
+        deleted_count = cur.rowcount
+        conn.commit()
+        logger.info(f"Deleted {deleted_count} chunks with type '{chunk_type}'")
+        return deleted_count
+    except Exception as e:
+        conn.rollback()
+        raise Exception(f"Failed to delete chunks by type: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
