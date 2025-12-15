@@ -54,12 +54,17 @@ class ChatService:
     
     def _handle_contractor_request(self, request: ChatRequest, info: dict) -> EnhancedChatResponse:
         """Handle contractor search with full info"""
-        # Search for relevant chunks
+        # Search for relevant chunks (search more to ensure we get enough unique contractors)
         query_vector = embed_via_gemini([request.message])[0]
-        hits = search_similar_vectors(query_vector, request.top_k * 2)
-        
+        search_limit = request.top_k * 5
+        logger.info(f"Searching for {search_limit} similar chunks for query: '{request.message}'")
+        hits = search_similar_vectors(query_vector, search_limit)  # Search 5x more chunks
+        logger.info(f"Vector search returned {len(hits)} chunks")
+
         # Extract contractor information
-        contractors = extract_contractor_info(hits, limit=min(request.top_k, 5))
+        extract_limit = min(request.top_k, 5)
+        logger.info(f"Attempting to extract up to {extract_limit} contractors from {len(hits)} chunks")
+        contractors = extract_contractor_info(hits, limit=extract_limit)
         
         if not contractors:
             from app.models.schemas import SourceItem

@@ -95,24 +95,31 @@ def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[Contract
     """Extract contractor information from chunks"""
     contractors = []
     seen = set()
-    
-    for chunk in chunks:
+
+    logger.info(f"Extracting contractors from {len(chunks)} chunks, limit={limit}")
+
+    for i, chunk in enumerate(chunks):
         if len(contractors) >= limit:
             break
-            
+
         content = chunk.get('content', '')
         if '|' not in content:
+            logger.debug(f"Chunk {i}: No pipe separator found")
             continue
-        
+
         parts = [p.strip() for p in content.split('|') if p.strip()]
         if len(parts) < 9:
+            logger.debug(f"Chunk {i}: Only {len(parts)} parts, need at least 9")
             continue
         
         contractor_id = parts[1]
         if contractor_id in seen:
+            logger.debug(f"Chunk {i}: Contractor {contractor_id} already seen, skipping")
             continue
         seen.add(contractor_id)
-        
+
+        logger.info(f"Chunk {i}: Extracting contractor {contractor_id} - {parts[2]}")
+
         try:
             # Extract specialties from field (parts[5]) if available
             specialties = []
@@ -135,10 +142,12 @@ def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[Contract
                 profile_url=f"{settings.FRONTEND_URL}/contractors/{contractor_id}",
                 contact_url=f"{settings.FRONTEND_URL}/contractors/{contractor_id}?action=contact"
             ))
+            logger.info(f"Successfully extracted contractor: {parts[2]}")
         except (IndexError, ValueError) as e:
-            logger.warning(f"Error parsing contractor: {e}")
+            logger.warning(f"Chunk {i}: Error parsing contractor {contractor_id}: {e}")
             continue
-    
+
+    logger.info(f"Extracted {len(contractors)} unique contractors from {len(chunks)} chunks")
     return contractors
 
 def generate_greeting() -> str:
