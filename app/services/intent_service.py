@@ -91,12 +91,12 @@ def detect_intent(msg: str) -> Tuple[ChatIntent, dict]:
         # This handles queries like "cho tôi tất cả nhà thầu", "danh sách nhà thầu"
         return (ChatIntent.CONTRACTOR_PARTIAL, info)
 
-def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[ContractorAction]:
-    """Extract contractor information from chunks"""
+def extract_contractor_info(chunks: List[dict], limit: int = 5, filter_criteria: dict = None) -> List[ContractorAction]:
+    """Extract contractor information from chunks with optional filtering"""
     contractors = []
     seen = set()
 
-    logger.info(f"Extracting contractors from {len(chunks)} chunks, limit={limit}")
+    logger.info(f"Extracting contractors from {len(chunks)} chunks, limit={limit}, filter={filter_criteria}")
 
     for i, chunk in enumerate(chunks):
         if len(contractors) >= limit:
@@ -111,15 +111,13 @@ def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[Contract
         if len(parts) < 9:
             logger.debug(f"Chunk {i}: Only {len(parts)} parts, need at least 9")
             continue
-        
+
         contractor_id = parts[1]
         if contractor_id in seen:
             logger.debug(f"Chunk {i}: Contractor {contractor_id} already seen, skipping")
             continue
-        seen.add(contractor_id)
 
-        logger.info(f"Chunk {i}: Extracting contractor {contractor_id} - {parts[2]}")
-
+        # Extract data first
         try:
             # Extract specialties from field (parts[5]) if available
             specialties = []
@@ -129,8 +127,8 @@ def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[Contract
                 # If single value, add it as specialty
                 if not specialties and parts[5].strip():
                     specialties = [parts[5].strip()]
-            
-            contractors.append(ContractorAction(
+
+            contractor = ContractorAction(
                 contractor_id=contractor_id,
                 contractor_name=parts[2],
                 contractor_slug=parts[3],
@@ -141,13 +139,47 @@ def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[Contract
                 location=parts[7],
                 profile_url=f"{settings.FRONTEND_URL}/contractors/{contractor_id}",
                 contact_url=f"{settings.FRONTEND_URL}/contractors/{contractor_id}?action=contact"
-            ))
-            logger.info(f"Successfully extracted contractor: {parts[2]}")
+            )
+
+            # Apply filters if provided
+            if filter_criteria:
+                # Filter by budget
+                if 'budget' in filter_criteria:
+                    budget_str = filter_criteria['budget']
+                    # Extract number from budget string (e.g., "2 tỷ" -> 2)
+                    import re
+                    budget_match = re.search(r'(\d+)', budget_str)
+                    if budget_match:
+                        user_budget = float(budget_match.group(1))
+                        # Parse contractor budget range (e.g., "2 tỷ - 8 tỷ")
+                        contractor_budget = parts[6]
+                        budget_parts = re.findall(r'(\d+\.?\d*)', contractor_budget)
+                        if len(budget_parts) >= 2:
+                            min_budget = float(budget_parts[0])
+                            max_budget = float(budget_parts[1])
+                            # Check if user budget is within range
+                            if not (min_budget <= user_budget <= max_budget):
+                                logger.debug(f"Chunk {i}: Budget {user_budget} tỷ not in range {min_budget}-{max_budget} tỷ")
+                                continue
+
+                # Filter by project type
+                if 'project_type' in filter_criteria:
+                    project_type = filter_criteria['project_type'].lower()
+                    description_lower = parts[4].lower()
+                    # Check if project type is mentioned in description
+                    if project_type not in description_lower:
+                        logger.debug(f"Chunk {i}: Project type '{project_type}' not found in description")
+                        continue
+
+            seen.add(contractor_id)
+            contractors.append(contractor)
+            logger.info(f"Chunk {i}: Successfully extracted contractor {parts[2]}")
+
         except (IndexError, ValueError) as e:
             logger.warning(f"Chunk {i}: Error parsing contractor {contractor_id}: {e}")
             continue
 
-    logger.info(f"Extracted {len(contractors)} unique contractors from {len(chunks)} chunks")
+    logger.info(f"Extracted {len(contractors)} unique contractors from {len(chunks)} chunks (after filtering)")
     return contractors
 
 def generate_greeting() -> str:

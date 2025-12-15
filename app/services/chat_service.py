@@ -61,10 +61,10 @@ class ChatService:
         hits = search_similar_vectors(query_vector, search_limit)  # Search 5x more chunks
         logger.info(f"Vector search returned {len(hits)} chunks")
 
-        # Extract contractor information
+        # Extract contractor information with filtering
         extract_limit = min(request.top_k, 5)
-        logger.info(f"Attempting to extract up to {extract_limit} contractors from {len(hits)} chunks")
-        contractors = extract_contractor_info(hits, limit=extract_limit)
+        logger.info(f"Attempting to extract up to {extract_limit} contractors from {len(hits)} chunks with filters: {info}")
+        contractors = extract_contractor_info(hits, limit=extract_limit, filter_criteria=info)
         
         if not contractors:
             from app.models.schemas import SourceItem
