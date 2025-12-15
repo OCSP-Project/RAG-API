@@ -34,13 +34,8 @@ class ChatService:
                 )
             
             if intent == ChatIntent.CONTRACTOR_PARTIAL:
-                from app.models.schemas import SourceItem
-                return EnhancedChatResponse(
-                    response=generate_missing_info(info),
-                    sources=[],
-                    contractors=[],
-                    has_recommendations=False
-                )
+                # Still search and show contractors, but ask for more info
+                return self._handle_contractor_request(request, info)
             
             if intent == ChatIntent.CONTRACTOR_FULL:
                 return self._handle_contractor_request(request, info)
@@ -75,19 +70,35 @@ class ChatService:
                 has_recommendations=False
             )
         
-        # Generate AI response
-        ctx = "\n".join([f"[{i+1}] {h['content'][:200]}" for i, h in enumerate(hits[:3])])
-        prompt = f"""Giới thiệu ngắn gọn (2 câu) {len(contractors)} nhà thầu phù hợp với:
-• Loại: {info.get('project_type')}
-• Ngân sách: {info.get('budget')}
+        # Generate AI response with contractor details
+        contractor_list = "\n".join([
+            f"• **{c.contractor_name}** - {c.location} - {c.rating}⭐ - {c.budget_range}"
+            for c in contractors
+        ])
 
-Kết thúc: "Xem chi tiết bên dưới!"
+        # Create contextual prompt based on available info
+        criteria = []
+        if info.get('project_type'):
+            criteria.append(f"Loại công trình: {info['project_type']}")
+        if info.get('budget'):
+            criteria.append(f"Ngân sách: {info['budget']}")
+        if info.get('location'):
+            criteria.append(f"Địa điểm: {info['location']}")
 
-Danh sách: {', '.join(c.contractor_name for c in contractors)}
-Chi tiết: {ctx[:500]}"""
-        
+        criteria_text = "\n".join(f"• {c}" for c in criteria) if criteria else "Hiển thị tất cả nhà thầu có sẵn"
+
+        prompt = f"""Viết câu giới thiệu ngắn gọn, thân thiện (1-2 câu) cho {len(contractors)} nhà thầu sau:
+
+{contractor_list}
+
+Tiêu chí tìm kiếm:
+{criteria_text}
+
+Kết thúc bằng: "Xem chi tiết và liên hệ bên dưới!"
+"""
+
         # Generate response
-        answer = f"Gợi ý {len(contractors)} nhà thầu phù hợp. Xem chi tiết bên dưới!"
+        answer = f"Tìm thấy {len(contractors)} nhà thầu phù hợp. Xem chi tiết bên dưới!"
         if self.gemini.is_configured():
             ai_response = self.gemini.generate_response(prompt)
             if ai_response:

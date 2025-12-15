@@ -84,10 +84,12 @@ def detect_intent(msg: str) -> Tuple[ChatIntent, dict]:
     # 4) Determine final intent
     if 'budget' in info and 'project_type' in info:
         return (ChatIntent.CONTRACTOR_FULL, info)
-    elif 'budget' in info or 'project_type' in info:
+    elif 'budget' in info or 'project_type' in info or 'location' in info:
         return (ChatIntent.CONTRACTOR_PARTIAL, info)
     else:
-        return (ChatIntent.GENERAL, {})
+        # If user asks about contractors but without specific info, still treat as contractor query
+        # This handles queries like "cho tôi tất cả nhà thầu", "danh sách nhà thầu"
+        return (ChatIntent.CONTRACTOR_PARTIAL, info)
 
 def extract_contractor_info(chunks: List[dict], limit: int = 5) -> List[ContractorAction]:
     """Extract contractor information from chunks"""
